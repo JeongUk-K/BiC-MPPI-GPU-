@@ -128,17 +128,31 @@ void MPPI_GPU::uploadCollisionData() {
     CUDA_CHECK(cudaMemcpy(d_map, flat.data(), map_sz, cudaMemcpyHostToDevice));
   }
 
-  // Circles
-  n_circles = (int)collision_checker->circles.size();
-  if (n_circles > 0) {
-    size_t sz = n_circles * 4 * sizeof(double);
-    CUDA_CHECK(cudaFree(d_circles));
-    CUDA_CHECK(cudaMalloc(&d_circles, sz));
-    std::vector<double> cbuf(n_circles * 4);
-    for (int i = 0; i < n_circles; ++i)
-      for (int j = 0; j < 4; ++j)
-        cbuf[i * 4 + j] = collision_checker->circles[i][j];
-    CUDA_CHECK(cudaMemcpy(d_circles, cbuf.data(), sz, cudaMemcpyHostToDevice));
+  // Circles / Cylinders
+  if (model_type == 3) {
+    n_circles = (int)collision_checker->cylinders_3d.size();
+    if (n_circles > 0) {
+      size_t sz = n_circles * 6 * sizeof(double);
+      CUDA_CHECK(cudaFree(d_circles));
+      CUDA_CHECK(cudaMalloc(&d_circles, sz));
+      std::vector<double> cbuf(n_circles * 6);
+      for (int i = 0; i < n_circles; ++i)
+        for (int j = 0; j < 6; ++j)
+          cbuf[i * 6 + j] = collision_checker->cylinders_3d[i][j];
+      CUDA_CHECK(cudaMemcpy(d_circles, cbuf.data(), sz, cudaMemcpyHostToDevice));
+    }
+  } else {
+    n_circles = (int)collision_checker->circles.size();
+    if (n_circles > 0) {
+      size_t sz = n_circles * 4 * sizeof(double);
+      CUDA_CHECK(cudaFree(d_circles));
+      CUDA_CHECK(cudaMalloc(&d_circles, sz));
+      std::vector<double> cbuf(n_circles * 4);
+      for (int i = 0; i < n_circles; ++i)
+        for (int j = 0; j < 4; ++j)
+          cbuf[i * 4 + j] = collision_checker->circles[i][j];
+      CUDA_CHECK(cudaMemcpy(d_circles, cbuf.data(), sz, cudaMemcpyHostToDevice));
+    }
   }
 
   // Rectangles

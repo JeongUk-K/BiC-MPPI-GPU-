@@ -89,7 +89,7 @@ __global__ void svgd_sample_rollout_forward_kernel(
     for (int d = 0; d < dim_x; ++d)
       xn[d] = x[d] + dt * xd_[d];
     if (!hit && check_collision(x, with_map, d_map, max_row, max_col, res,
-                                d_circles, n_circ, d_rects, n_rect)) {
+                                d_circles, n_circ, d_rects, n_rect, model_type)) {
       hit = true;
       cost = 1e8;
     }
@@ -107,7 +107,7 @@ __global__ void svgd_sample_rollout_forward_kernel(
       cost += p_manipulator(x, d_x_target, dim_x);
     }
     if (check_collision(x, with_map, d_map, max_row, max_col, res, d_circles,
-                        n_circ, d_rects, n_rect))
+                        n_circ, d_rects, n_rect, model_type))
       cost = 1e8;
   }
   d_sample_costs[i] = cost;
@@ -184,7 +184,7 @@ __global__ void svgd_sample_rollout_backward_kernel(
     for (int d = 0; d < dim_x; ++d)
       xn[d] = x[d] - dt * xd_[d];
     if (!hit && check_collision(x, with_map, d_map, max_row, max_col, res,
-                                d_circles, n_circ, d_rects, n_rect)) {
+                                d_circles, n_circ, d_rects, n_rect, model_type)) {
       hit = true;
       cost = 1e8;
     }
@@ -202,7 +202,7 @@ __global__ void svgd_sample_rollout_backward_kernel(
       cost += p_manipulator(x, d_x_init, dim_x);
     }
     if (check_collision(x, with_map, d_map, max_row, max_col, res, d_circles,
-                        n_circ, d_rects, n_rect))
+                        n_circ, d_rects, n_rect, model_type))
       cost = 1e8;
   }
   d_sample_costs[i] = cost;
@@ -314,7 +314,7 @@ __global__ void svgd_final_eval_forward_kernel(
     for (int d = 0; d < dim_x; ++d)
       xn[d] = x[d] + dt * xd_[d];
     if (!hit && check_collision(x, with_map, d_map, max_row, max_col, res,
-                                d_circles, n_circ, d_rects, n_rect)) {
+                                d_circles, n_circ, d_rects, n_rect, model_type)) {
       hit = true;
       cost = 1e8;
     }
@@ -332,7 +332,7 @@ __global__ void svgd_final_eval_forward_kernel(
       cost += p_manipulator(x, d_x_target, dim_x);
     }
     if (check_collision(x, with_map, d_map, max_row, max_col, res, d_circles,
-                        n_circ, d_rects, n_rect))
+                        n_circ, d_rects, n_rect, model_type))
       cost = 1e8;
   }
   d_costs[i] = cost;
@@ -399,7 +399,7 @@ __global__ void svgd_final_eval_backward_kernel(
     for (int d = 0; d < dim_x; ++d)
       xn[d] = x[d] - dt * xd_[d];
     if (!hit && check_collision(x, with_map, d_map, max_row, max_col, res,
-                                d_circles, n_circ, d_rects, n_rect)) {
+                                d_circles, n_circ, d_rects, n_rect, model_type)) {
       hit = true;
       cost = 1e8;
     }
@@ -417,7 +417,7 @@ __global__ void svgd_final_eval_backward_kernel(
       cost += p_manipulator(x, d_x_init, dim_x);
     }
     if (check_collision(x, with_map, d_map, max_row, max_col, res, d_circles,
-                        n_circ, d_rects, n_rect))
+                        n_circ, d_rects, n_rect, model_type))
       cost = 1e8;
   }
   d_costs[i] = cost;
@@ -502,7 +502,7 @@ __global__ void guide_rollout_kernel(
     for (int d = 0; d < dim_x; ++d)
       xn[d] = x[d] + dt * xd_[d];
     if (!hit && check_collision(x, with_map, d_map, max_row, max_col, res,
-                                d_circles, n_circ, d_rects, n_rect)) {
+                                d_circles, n_circ, d_rects, n_rect, model_type)) {
       hit = true;
       cost = 1e8;
     }
@@ -520,7 +520,7 @@ __global__ void guide_rollout_kernel(
       cost += p_manipulator(x, d_x_target, dim_x);
     }
     if (check_collision(x, with_map, d_map, max_row, max_col, res, d_circles,
-                        n_circ, d_rects, n_rect))
+                        n_circ, d_rects, n_rect, model_type))
       cost = 1e8;
   }
   d_costs[i] = cost;
@@ -721,15 +721,29 @@ void SVGDMPPI_GPU::uploadCollisionData() {
         flat[r * map_max_col + c] = collision_checker->map[r][c];
     CUDA_CHECK(cudaMemcpy(d_map, flat.data(), sz, cudaMemcpyHostToDevice));
   }
-  n_circles = (int)collision_checker->circles.size();
-  if (n_circles > 0) {
-    size_t sz = n_circles * 4 * sizeof(double);
-    safe_cuda_malloc(&d_circles, sz);
-    std::vector<double> buf(n_circles * 4);
-    for (int i = 0; i < n_circles; ++i)
-      for (int j = 0; j < 4; ++j)
-        buf[i * 4 + j] = collision_checker->circles[i][j];
-    CUDA_CHECK(cudaMemcpy(d_circles, buf.data(), sz, cudaMemcpyHostToDevice));
+  // Circles / Cylinders
+  if (model_type == 3) {
+    n_circles = (int)collision_checker->cylinders_3d.size();
+    if (n_circles > 0) {
+      size_t sz = n_circles * 6 * sizeof(double);
+      safe_cuda_malloc(&d_circles, sz);
+      std::vector<double> buf(n_circles * 6);
+      for (int i = 0; i < n_circles; ++i)
+        for (int j = 0; j < 6; ++j)
+          buf[i * 6 + j] = collision_checker->cylinders_3d[i][j];
+      CUDA_CHECK(cudaMemcpy(d_circles, buf.data(), sz, cudaMemcpyHostToDevice));
+    }
+  } else {
+    n_circles = (int)collision_checker->circles.size();
+    if (n_circles > 0) {
+      size_t sz = n_circles * 4 * sizeof(double);
+      safe_cuda_malloc(&d_circles, sz);
+      std::vector<double> buf(n_circles * 4);
+      for (int i = 0; i < n_circles; ++i)
+        for (int j = 0; j < 4; ++j)
+          buf[i * 4 + j] = collision_checker->circles[i][j];
+      CUDA_CHECK(cudaMemcpy(d_circles, buf.data(), sz, cudaMemcpyHostToDevice));
+    }
   }
   n_rects = (int)collision_checker->rectangles.size();
   if (n_rects > 0) {

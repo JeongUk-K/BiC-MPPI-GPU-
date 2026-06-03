@@ -56,17 +56,22 @@ double cylinderCost(double px, double py, double pz,
                     const std::vector<Cylinder> &cyls) {
   double cost = 0.0;
   for (const auto &c : cyls) {
-    // Only penalize within z range
-    if (pz < c.z_min - 0.1 || pz > c.z_max + 0.1) continue;
+    if (pz < c.z_min - 0.05 || pz > c.z_max + 0.05) continue;
     double dx = px - c.cx, dy = py - c.cy;
     double dist = std::sqrt(dx*dx + dy*dy);
-    const double death_r = c.r + 0.04;   // hard collision zone
-    const double warn_r  = c.r + 0.15;   // soft warning zone
+    const double death_r = c.r + 0.12;   // safety margin buffer
+    const double warn_r  = c.r + 0.30;   // wider warning zone
     if (dist < death_r) {
-      cost += 200000.0;
+      cost += 500000.0;
     } else if (dist < warn_r) {
       double excess = warn_r - dist;
-      cost += 80000.0 * excess * excess;
+      cost += 200000.0 * excess * excess;
+
+      // Z-up helper cost
+      double target_z = c.z_max + 0.15;
+      if (pz < target_z) {
+        cost += 1000.0 * (target_z - pz);
+      }
     }
   }
   return cost;
@@ -104,19 +109,20 @@ int main(int argc, char **argv) {
         jlim += 5.0 * (std::abs(norm) - 1.0) * (std::abs(norm) - 1.0);
     }
 
-    // 3) Cylinder avoidance via FK
+    // 3) Cylinder avoidance via FK with dense link sampling
     double obs = 0.0;
     if (!cyls.empty()) {
       auto T_fk = model.computeForwardKinematics(x);
-      // Check each joint position and link midpoint
+      // Densely sample each of the 6 link segments
       for (int k = 0; k < model.dof; ++k) {
-        Eigen::Vector3d p = T_fk[k].block<3,1>(0,3);
-        obs += cylinderCost(p.x(), p.y(), p.z(), cyls);
-        // Also check midpoint of link
-        if (k > 0) {
-          Eigen::Vector3d p_prev = T_fk[k-1].block<3,1>(0,3);
-          Eigen::Vector3d mid = (p + p_prev) * 0.5;
-          obs += cylinderCost(mid.x(), mid.y(), mid.z(), cyls);
+        Eigen::Vector3d p_start = (k == 0) ? Eigen::Vector3d(0, 0, 0) : T_fk[k-1].block<3,1>(0,3);
+        Eigen::Vector3d p_end = T_fk[k].block<3,1>(0,3);
+        
+        const int num_samples = 15; // 15 points per link segment
+        for (int s = 0; s <= num_samples; ++s) {
+          double alpha = (double)s / num_samples;
+          Eigen::Vector3d p = p_start * (1.0 - alpha) + p_end * alpha;
+          obs += cylinderCost(p.x(), p.y(), p.z(), cyls);
         }
       }
     }
@@ -146,7 +152,7 @@ int main(int argc, char **argv) {
   param.gamma_u = 0.1;
 
   Eigen::VectorXd sigma_u(model.dim_u);
-  sigma_u << 0.3, 0.2, 0.2, 0.2, 0.2, 0.2;
+  sigma_u << 0.5, 0.3, 0.3, 0.2, 0.2, 0.2;
   param.sigma_u = sigma_u.asDiagonal();
 
   int maxiter   = 300;

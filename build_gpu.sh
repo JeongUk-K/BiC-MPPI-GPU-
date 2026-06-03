@@ -14,6 +14,10 @@ set -e
 # ── 경로 설정 ─────────────────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
+BUILD_ROOT="$SCRIPT_DIR/build"
+GPU_BUILD_DIR="$BUILD_ROOT/gpu"
+TARGET_GROUP="${1:-manipulator}"
+BUILD_PREFIX=""
 
 NVCC=""
 CUDA_INCLUDE=""
@@ -61,6 +65,7 @@ echo "  nvcc        : $NVCC"
 echo "  CUDA include: $CUDA_INCLUDE"
 echo "  cudart      : ${CUDART_LIB:-NOT FOUND}"
 echo "  curand      : ${CURAND_LIB:-NOT FOUND}"
+echo "  target group: $TARGET_GROUP"
 echo "================================"
 
 # ── 컴파일 옵션 ───────────────────────────────────────────────────
@@ -95,73 +100,87 @@ LDFLAGS="-fopenmp"
 LDFLAGS="$LDFLAGS $(python3-config --ldflags --embed 2>/dev/null || python3-config --ldflags)"
 
 # ── 빌드 디렉토리 ─────────────────────────────────────────────────
-mkdir -p build_gpu
+mkdir -p "$GPU_BUILD_DIR"
 
 # ── GPU solver 오브젝트 파일 컴파일 ──────────────────────────────
 echo "[1/6] Compiling mppi_gpu.cu ..."
-$NVCC $NVCCFLAGS $INCLUDES -c mppi/cuda/mppi_gpu.cu -o build_gpu/mppi_gpu.o
+$NVCC $NVCCFLAGS $INCLUDES -c mppi/cuda/mppi_gpu.cu -o "$GPU_BUILD_DIR/mppi_gpu.o"
 
 echo "[2/6] Compiling cluster_mppi_gpu.cu ..."
-$NVCC $NVCCFLAGS $INCLUDES -c mppi/cuda/cluster_mppi_gpu.cu -o build_gpu/cluster_mppi_gpu.o
+$NVCC $NVCCFLAGS $INCLUDES -c mppi/cuda/cluster_mppi_gpu.cu -o "$GPU_BUILD_DIR/cluster_mppi_gpu.o"
 
 echo "[3/6] Compiling bi_mppi_gpu.cu ..."
-$NVCC $NVCCFLAGS $INCLUDES -c mppi/cuda/bi_mppi_gpu.cu -o build_gpu/bi_mppi_gpu.o
+$NVCC $NVCCFLAGS $INCLUDES -c mppi/cuda/bi_mppi_gpu.cu -o "$GPU_BUILD_DIR/bi_mppi_gpu.o"
 
 echo "[4/6] Compiling svgd_mppi_gpu.cu ..."
-$NVCC $NVCCFLAGS $INCLUDES -c mppi/cuda/svgd_mppi_gpu.cu -o build_gpu/svgd_mppi_gpu.o
+$NVCC $NVCCFLAGS $INCLUDES -c mppi/cuda/svgd_mppi_gpu.cu -o "$GPU_BUILD_DIR/svgd_mppi_gpu.o"
 
 echo "[5/6] Compiling log_mppi_gpu.cu ..."
-$NVCC $NVCCFLAGS $INCLUDES -c mppi/cuda/log_mppi_gpu.cu -o build_gpu/log_mppi_gpu.o
+$NVCC $NVCCFLAGS $INCLUDES -c mppi/cuda/log_mppi_gpu.cu -o "$GPU_BUILD_DIR/log_mppi_gpu.o"
 
 # GPU 오브젝트들을 ar로 정적 라이브러리로 묶기
-GPU_OBJS="build_gpu/mppi_gpu.o build_gpu/cluster_mppi_gpu.o build_gpu/bi_mppi_gpu.o build_gpu/svgd_mppi_gpu.o build_gpu/log_mppi_gpu.o"
-ar rcs build_gpu/libmppi_gpu.a $GPU_OBJS
-echo "  → build_gpu/libmppi_gpu.a 생성 완료"
+GPU_OBJS=("$GPU_BUILD_DIR/mppi_gpu.o" "$GPU_BUILD_DIR/cluster_mppi_gpu.o" "$GPU_BUILD_DIR/bi_mppi_gpu.o" "$GPU_BUILD_DIR/svgd_mppi_gpu.o" "$GPU_BUILD_DIR/log_mppi_gpu.o")
+ar rcs "$GPU_BUILD_DIR/libmppi_gpu.a" "${GPU_OBJS[@]}"
+echo "  → build/gpu/libmppi_gpu.a 생성 완료"
 
 # ── 실행 파일 링크 ────────────────────────────────────────────────
 build_target() {
     local SRC="$1"
-    local NAME=$(basename "${SRC%.cpp}")
+    local NAME="${BUILD_PREFIX}$(basename "${SRC%.cpp}")"
     echo "[4/?] Building $NAME ..."
     $CXX $CXXFLAGS $INCLUDES "$SRC" \
-        -Lbuild_gpu -lmppi_gpu \
+        -L"$GPU_BUILD_DIR" -lmppi_gpu \
         -Wl,-rpath,$(dirname ${CUDART_LIB:-/dev/null}) \
         $LDFLAGS \
-        -o "build_gpu/$NAME"
-    echo "  → build_gpu/$NAME 완료"
+        -o "$GPU_BUILD_DIR/$NAME"
+    echo "  → build/gpu/$NAME 완료"
 }
 
 # ===========================================================================
 # 빌드할 소스 파일 선택 (사용할 예제의 주석을 해제하세요)
 # ===========================================================================
-
-# ---- WMRobot GPU 버전 ----
-build_target src/wmrobot/gpu/mppi.cpp
-build_target src/wmrobot/gpu/cluster_mppi.cpp
-build_target src/wmrobot/gpu/bi_mppi.cpp
-build_target src/wmrobot/gpu/svgd_mppi.cpp
-# build_target src/wmrobot/gpu/log_mppi.cpp
-
-# ---- Quadrotor GPU 버전 ----
-# build_target src/quadrotor/gpu/mppi.cpp
-# build_target src/quadrotor/gpu/cluster_mppi.cpp
-# build_target src/quadrotor/gpu/bi_mppi.cpp
-# build_target src/quadrotor/gpu/svgd_mppi.cpp
-# build_target src/quadrotor/gpu/log_mppi.cpp
-
-# ---- Manipulator GPU 버전 ----
-# build_target src/manipulator/gpu/mppi.cpp
-# build_target src/manipulator/gpu/cluster_mppi.cpp
-# build_target src/manipulator/gpu/bi_mppi.cpp
-# build_target src/manipulator/gpu/svgd_mppi.cpp
-# build_target src/manipulator/gpu/mppi_cylinder.cpp
-
-# ---- Velo GPU 버전 ----
-# build_target src/velo/gpu/mppi.cpp
-# build_target src/velo/gpu/cluster_mppi.cpp
-# build_target src/velo/gpu/bi_mppi.cpp
-# build_target src/velo/gpu/svgd_mppi.cpp
-# build_target src/velo/gpu/log_mppi.cpp
+case "$TARGET_GROUP" in
+    manipulator)
+        # ---- Manipulator GPU 버전 ----
+        build_target src/manipulator/gpu/mppi.cpp
+        build_target src/manipulator/gpu/cluster_mppi.cpp
+        build_target src/manipulator/gpu/bi_mppi.cpp
+        build_target src/manipulator/gpu/svgd_mppi.cpp
+        build_target src/manipulator/gpu/mppi_cylinder.cpp
+        ;;
+    quadrotor)
+        # ---- Quadrotor GPU 버전 ----
+        BUILD_PREFIX="quadrotor_"
+        build_target src/quadrotor/gpu/mppi.cpp
+        build_target src/quadrotor/gpu/log_mppi.cpp
+        build_target src/quadrotor/gpu/cluster_mppi.cpp
+        build_target src/quadrotor/gpu/bi_mppi.cpp
+        build_target src/quadrotor/gpu/svgd_mppi.cpp
+        ;;
+    wmrobot)
+        # ---- WMRobot GPU 버전 ----
+        BUILD_PREFIX="wmrobot_"
+        build_target src/wmrobot/gpu/mppi.cpp
+        build_target src/wmrobot/gpu/log_mppi.cpp
+        build_target src/wmrobot/gpu/cluster_mppi.cpp
+        build_target src/wmrobot/gpu/bi_mppi.cpp
+        build_target src/wmrobot/gpu/svgd_mppi.cpp
+        ;;
+    velo)
+        # ---- Velo GPU 버전 ----
+        BUILD_PREFIX="velo_"
+        build_target src/velo/gpu/mppi.cpp
+        build_target src/velo/gpu/log_mppi.cpp
+        build_target src/velo/gpu/cluster_mppi.cpp
+        build_target src/velo/gpu/bi_mppi.cpp
+        build_target src/velo/gpu/svgd_mppi.cpp
+        ;;
+    *)
+        echo "ERROR: unknown GPU target group: $TARGET_GROUP"
+        echo "Usage: bash build_gpu.sh [manipulator|quadrotor|wmrobot|velo]"
+        exit 1
+        ;;
+esac
 
 # ---- WMRobot map_78 시각화 버전 ----
 build_target_named() {
@@ -169,11 +188,11 @@ build_target_named() {
     local NAME="$2"
     echo "[vis] Building $NAME ..."
     $CXX $CXXFLAGS $INCLUDES "$SRC" \
-        -Lbuild_gpu -lmppi_gpu \
+        -L"$GPU_BUILD_DIR" -lmppi_gpu \
         -Wl,-rpath,$(dirname ${CUDART_LIB:-/dev/null}) \
         $LDFLAGS \
-        -o "build_gpu/$NAME"
-    echo "  → build_gpu/$NAME 완료"
+        -o "$GPU_BUILD_DIR/$NAME"
+    echo "  → build/gpu/$NAME 완료"
 }
 # build_target_named src/wmrobot/map_285/mppi.cpp vis_mppi
 # build_target_named src/wmrobot/map_285/cluster_mppi.cpp vis_cluster_mppi
@@ -182,10 +201,15 @@ build_target_named() {
 
 echo ""
 echo "=== 빌드 완료 ==="
-echo "실행: cd build_gpu && ./mppi"
-echo "      cd build_gpu && ./bi_mppi"
-echo "      cd build_gpu && ./cluster_mppi"
+if [ "$TARGET_GROUP" = "manipulator" ]; then
+    echo "실행: cd build && ./gpu/mppi"
+    echo "      cd build && ./gpu/bi_mppi"
+    echo "      cd build && ./gpu/cluster_mppi"
+else
+    echo "실행: cd build && ./gpu/${TARGET_GROUP}_mppi"
+    echo "      cd build && ./gpu/${TARGET_GROUP}_bi_mppi"
+    echo "      cd build && ./gpu/${TARGET_GROUP}_cluster_mppi"
+fi
 echo ""
-echo "시각화: cd build_gpu && ./vis_mppi && python3 ../build/visualize_mppi.py vis_data/mppi/"
-echo "        cd build_gpu && ./vis_bi_mppi && python3 ../build/visualize_mppi.py vis_data/bi_mppi/"
-
+echo "시각화: cd build && ./gpu/vis_mppi && python3 visualize_mppi.py vis_data/mppi/"
+echo "        cd build && ./gpu/vis_bi_mppi && python3 visualize_mppi.py vis_data/bi_mppi/"

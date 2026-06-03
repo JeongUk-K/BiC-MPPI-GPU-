@@ -15,6 +15,8 @@ set -e
 # ── 경로 설정 ─────────────────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
+BUILD_ROOT="$SCRIPT_DIR/build"
+CPU_BUILD_DIR="$BUILD_ROOT/cpu"
 
 # ── 컴파일 옵션 ───────────────────────────────────────────────────
 CXX=g++
@@ -30,7 +32,7 @@ INCLUDES="-I./mppi -I./model \
 LDFLAGS="-fopenmp $(python3-config --ldflags --embed 2>/dev/null || python3-config --ldflags)"
 
 # ── 빌드 디렉토리 ─────────────────────────────────────────────────
-mkdir -p build_cpu
+mkdir -p "$CPU_BUILD_DIR"
 
 # ── 실행 파일 링크 ────────────────────────────────────────────────
 build_target() {
@@ -39,8 +41,8 @@ build_target() {
     echo "Building $NAME ..."
     $CXX $CXXFLAGS $INCLUDES "$SRC" \
         $LDFLAGS \
-        -o "build_cpu/$NAME"
-    echo "  → build_cpu/$NAME 완료"
+        -o "$CPU_BUILD_DIR/$NAME"
+    echo "  → build/cpu/$NAME 완료"
 }
 
 # ===========================================================================
@@ -53,13 +55,12 @@ echo "  Flags    : $CXXFLAGS"
 echo "================================"
 
 # ---- WMRobot CPU 버전 ----
-build_target src/wmrobot/cpu/mppi.cpp
-# build_target src/wmrobot/cpu/cluster_mppi.cpp
-# build_target src/wmrobot/cpu/bi_mppi.cpp
-# build_target src/wmrobot/cpu/log_mppi.cpp
-# build_target src/wmrobot/cpu/svgd_mppi.cpp
-# build_target src/wmrobot/cpu/rrt_connect.cpp
+# src/wmrobot/mppi.cpp, cluster_mppi.cpp, bi_mppi.cpp는 현재 GPU solver를
+# 사용하므로 build_gpu.sh에서 빌드합니다.
+build_target src/wmrobot/log_mppi.cpp
+# build_target src/wmrobot/svgd_mppi.cpp
+# build_target src/wmrobot/rrt_connect.cpp
 
 echo ""
 echo "=== 빌드 완료 ==="
-echo "실행: cd build_cpu && ./mppi"
+echo "실행: cd build && ./cpu/log_mppi"

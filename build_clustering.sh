@@ -3,13 +3,15 @@
 # clustering.sh — 빌드 스크립트 for Clustering Parameter cpp 파일들
 #
 # src/wmrobot/clustering parameter/ 안의 모든 cpp 파일들을 빌드하여
-# build_gpu/ 디렉토리에 실행 파일로 저장합니다.
+# build/gpu/ 디렉토리에 실행 파일로 저장합니다.
 # ============================================================
 set -e
 
 # ── 경로 설정 ─────────────────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
+BUILD_ROOT="$SCRIPT_DIR/build"
+GPU_BUILD_DIR="$BUILD_ROOT/gpu"
 
 NVCC=""
 CUDA_INCLUDE=""
@@ -84,26 +86,26 @@ LDFLAGS="-fopenmp"
 LDFLAGS="$LDFLAGS $(python3-config --ldflags --embed 2>/dev/null || python3-config --ldflags)"
 
 # ── 빌드 디렉토리 생성 ─────────────────────────────────────────────
-mkdir -p build_gpu
+mkdir -p "$GPU_BUILD_DIR"
 
 # ── GPU 라이브러리 검사 및 빌드 ───────────────────────────────────
-if [ ! -f "build_gpu/libmppi_gpu.a" ]; then
+if [ ! -f "$GPU_BUILD_DIR/libmppi_gpu.a" ]; then
     echo "libmppi_gpu.a가 없습니다. GPU 라이브러리를 먼저 빌드합니다..."
     echo "Compiling mppi_gpu.cu ..."
-    $NVCC $NVCCFLAGS $INCLUDES -c mppi/cuda/mppi_gpu.cu -o build_gpu/mppi_gpu.o
+    $NVCC $NVCCFLAGS $INCLUDES -c mppi/cuda/mppi_gpu.cu -o "$GPU_BUILD_DIR/mppi_gpu.o"
 
     echo "Compiling cluster_mppi_gpu.cu ..."
-    $NVCC $NVCCFLAGS $INCLUDES -c mppi/cuda/cluster_mppi_gpu.cu -o build_gpu/cluster_mppi_gpu.o
+    $NVCC $NVCCFLAGS $INCLUDES -c mppi/cuda/cluster_mppi_gpu.cu -o "$GPU_BUILD_DIR/cluster_mppi_gpu.o"
 
     echo "Compiling bi_mppi_gpu.cu ..."
-    $NVCC $NVCCFLAGS $INCLUDES -c mppi/cuda/bi_mppi_gpu.cu -o build_gpu/bi_mppi_gpu.o
+    $NVCC $NVCCFLAGS $INCLUDES -c mppi/cuda/bi_mppi_gpu.cu -o "$GPU_BUILD_DIR/bi_mppi_gpu.o"
 
     echo "Compiling svgd_mppi_gpu.cu ..."
-    $NVCC $NVCCFLAGS $INCLUDES -c mppi/cuda/svgd_mppi_gpu.cu -o build_gpu/svgd_mppi_gpu.o
+    $NVCC $NVCCFLAGS $INCLUDES -c mppi/cuda/svgd_mppi_gpu.cu -o "$GPU_BUILD_DIR/svgd_mppi_gpu.o"
 
-    GPU_OBJS="build_gpu/mppi_gpu.o build_gpu/cluster_mppi_gpu.o build_gpu/bi_mppi_gpu.o build_gpu/svgd_mppi_gpu.o"
-    ar rcs build_gpu/libmppi_gpu.a $GPU_OBJS
-    echo "  → build_gpu/libmppi_gpu.a 생성 완료"
+    GPU_OBJS=("$GPU_BUILD_DIR/mppi_gpu.o" "$GPU_BUILD_DIR/cluster_mppi_gpu.o" "$GPU_BUILD_DIR/bi_mppi_gpu.o" "$GPU_BUILD_DIR/svgd_mppi_gpu.o")
+    ar rcs "$GPU_BUILD_DIR/libmppi_gpu.a" "${GPU_OBJS[@]}"
+    echo "  → build/gpu/libmppi_gpu.a 생성 완료"
 fi
 
 # ── 실행 파일 링크 함수 ────────────────────────────────────────────
@@ -112,11 +114,11 @@ build_target() {
     local NAME=$(basename "${SRC%.cpp}")
     echo "Building $NAME ..."
     $CXX $CXXFLAGS $INCLUDES "$SRC" \
-        -Lbuild_gpu -lmppi_gpu \
+        -L"$GPU_BUILD_DIR" -lmppi_gpu \
         -Wl,-rpath,$(dirname ${CUDART_LIB:-/dev/null}) \
         $LDFLAGS \
-        -o "build_gpu/$NAME"
-    echo "  → build_gpu/$NAME 완료"
+        -o "$GPU_BUILD_DIR/$NAME"
+    echo "  → build/gpu/$NAME 완료"
 }
 
 # ── Clustering Parameter 디렉토리 내 모든 cpp 빌드 ────────────────

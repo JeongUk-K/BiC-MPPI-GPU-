@@ -29,12 +29,9 @@ endmacro()
 # ===========================================================================
 
 # ---- WMRobot CPU 버전 ----
-add_cpu_target(src/wmrobot/cpu/mppi.cpp)
-add_cpu_target(src/wmrobot/cpu/cluster_mppi.cpp)
-add_cpu_target(src/wmrobot/cpu/bi_mppi.cpp)
-add_cpu_target(src/wmrobot/cpu/log_mppi.cpp)
-add_cpu_target(src/wmrobot/cpu/svgd_mppi.cpp)
-add_cpu_target(src/wmrobot/cpu/rrt_connect.cpp)
+add_cpu_target(src/wmrobot/log_mppi.cpp)
+add_cpu_target(src/wmrobot/svgd_mppi.cpp)
+add_cpu_target(src/wmrobot/rrt_connect.cpp)
 
 # ---- Clustering Parameter (CPU) ----
 # add_cpu_target("src/wmrobot/clustering parameter/bi_mppi.cpp")

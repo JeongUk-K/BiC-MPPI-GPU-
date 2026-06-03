@@ -6,6 +6,8 @@
 #include <fstream>
 #include <iostream>
 
+#include "quadrotor_path_logger.h"
+
 int main() {
   auto model = Quadrotor();
 
@@ -31,6 +33,8 @@ int main() {
   csv << "map,is_failed,is_landed,iter,elapsed,elapsed_rollout,elapsed_"
          "clustering,"
          "elapsed_connection,elapsed_guide,f_err\n";
+  std::ofstream path_csv("path_quadrotor_mppi.csv");
+  writeQuadrotorPathHeader(path_csv);
 
   for (int map = 299; map >= 0; --map) {
     CollisionChecker collision_checker = CollisionChecker();
@@ -42,6 +46,7 @@ int main() {
     solver.U_0.row(2).array() += model.g;
     solver.init(param);
     solver.setCollisionChecker(&collision_checker);
+    writeQuadrotorPathRow(path_csv, "mppi", map, 0, solver.x_init);
 
     bool is_landed = false;
     bool is_failed = true;
@@ -55,6 +60,7 @@ int main() {
     for (i = 0; i < maxiter; ++i) {
       solver.solve();
       solver.move();
+      writeQuadrotorPathRow(path_csv, "mppi", map, i + 1, solver.x_init);
 
       total_elapsed += solver.elapsed;
       total_rollout += solver.elapsed_rollout;
@@ -84,5 +90,6 @@ int main() {
   }
 
   csv.close();
+  path_csv.close();
   return 0;
 }
