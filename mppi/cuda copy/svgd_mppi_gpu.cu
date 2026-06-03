@@ -721,15 +721,29 @@ void SVGDMPPI_GPU::uploadCollisionData() {
         flat[r * map_max_col + c] = collision_checker->map[r][c];
     CUDA_CHECK(cudaMemcpy(d_map, flat.data(), sz, cudaMemcpyHostToDevice));
   }
-  n_circles = (int)collision_checker->circles.size();
-  if (n_circles > 0) {
-    size_t sz = n_circles * 4 * sizeof(double);
-    safe_cuda_malloc(&d_circles, sz);
-    std::vector<double> buf(n_circles * 4);
-    for (int i = 0; i < n_circles; ++i)
-      for (int j = 0; j < 4; ++j)
-        buf[i * 4 + j] = collision_checker->circles[i][j];
-    CUDA_CHECK(cudaMemcpy(d_circles, buf.data(), sz, cudaMemcpyHostToDevice));
+  // Circles / Cylinders
+  if (model_type == 3) {
+    n_circles = (int)collision_checker->cylinders_3d.size();
+    if (n_circles > 0) {
+      size_t sz = n_circles * 6 * sizeof(double);
+      safe_cuda_malloc(&d_circles, sz);
+      std::vector<double> buf(n_circles * 6);
+      for (int i = 0; i < n_circles; ++i)
+        for (int j = 0; j < 6; ++j)
+          buf[i * 6 + j] = collision_checker->cylinders_3d[i][j];
+      CUDA_CHECK(cudaMemcpy(d_circles, buf.data(), sz, cudaMemcpyHostToDevice));
+    }
+  } else {
+    n_circles = (int)collision_checker->circles.size();
+    if (n_circles > 0) {
+      size_t sz = n_circles * 4 * sizeof(double);
+      safe_cuda_malloc(&d_circles, sz);
+      std::vector<double> buf(n_circles * 4);
+      for (int i = 0; i < n_circles; ++i)
+        for (int j = 0; j < 4; ++j)
+          buf[i * 4 + j] = collision_checker->circles[i][j];
+      CUDA_CHECK(cudaMemcpy(d_circles, buf.data(), sz, cudaMemcpyHostToDevice));
+    }
   }
   n_rects = (int)collision_checker->rectangles.size();
   if (n_rects > 0) {

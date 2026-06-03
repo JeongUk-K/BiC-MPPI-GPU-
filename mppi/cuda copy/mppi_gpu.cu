@@ -128,16 +128,31 @@ void MPPI_GPU::uploadCollisionData() {
     CUDA_CHECK(cudaMemcpy(d_map, flat.data(), map_sz, cudaMemcpyHostToDevice));
   }
 
-  n_circles = (int)collision_checker->circles.size();
-  if (n_circles > 0) {
-    size_t sz = n_circles * 4 * sizeof(double);
-    CUDA_CHECK(cudaFree(d_circles));
-    CUDA_CHECK(cudaMalloc(&d_circles, sz));
-    std::vector<double> cbuf(n_circles * 4);
-    for (int i = 0; i < n_circles; ++i)
-      for (int j = 0; j < 4; ++j)
-        cbuf[i * 4 + j] = collision_checker->circles[i][j];
-    CUDA_CHECK(cudaMemcpy(d_circles, cbuf.data(), sz, cudaMemcpyHostToDevice));
+  // Circles / Cylinders
+  if (model_type == 3) {
+    n_circles = (int)collision_checker->cylinders_3d.size();
+    if (n_circles > 0) {
+      size_t sz = n_circles * 6 * sizeof(double);
+      CUDA_CHECK(cudaFree(d_circles));
+      CUDA_CHECK(cudaMalloc(&d_circles, sz));
+      std::vector<double> cbuf(n_circles * 6);
+      for (int i = 0; i < n_circles; ++i)
+        for (int j = 0; j < 6; ++j)
+          cbuf[i * 6 + j] = collision_checker->cylinders_3d[i][j];
+      CUDA_CHECK(cudaMemcpy(d_circles, cbuf.data(), sz, cudaMemcpyHostToDevice));
+    }
+  } else {
+    n_circles = (int)collision_checker->circles.size();
+    if (n_circles > 0) {
+      size_t sz = n_circles * 4 * sizeof(double);
+      CUDA_CHECK(cudaFree(d_circles));
+      CUDA_CHECK(cudaMalloc(&d_circles, sz));
+      std::vector<double> cbuf(n_circles * 4);
+      for (int i = 0; i < n_circles; ++i)
+        for (int j = 0; j < 4; ++j)
+          cbuf[i * 4 + j] = collision_checker->circles[i][j];
+      CUDA_CHECK(cudaMemcpy(d_circles, cbuf.data(), sz, cudaMemcpyHostToDevice));
+    }
   }
 
   // Rectangles
@@ -195,7 +210,7 @@ void MPPI_GPU::solve() {
       d_costs, d_Di,
       with_map, d_map, map_max_row, map_max_col, map_resolution,
       d_circles, n_circles, d_rects, n_rects,
-      N, dim_u, dim_x, T, (double)dt, gamma_u, model_type, false);
+      N, dim_u, dim_x, T, (double)dt, gamma_u, model_type);
   CUDA_CHECK(cudaGetLastError());
 
   // Copy costs to CPU for min

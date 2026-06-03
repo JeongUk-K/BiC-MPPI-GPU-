@@ -6,8 +6,10 @@
 # 자동으로 감지합니다. 없으면 MATLAB 번들 nvcc를 사용합니다.
 #
 # 사용법:
-#   bash build_gpu.sh          # 전체 빌드
-#   bash build_gpu.sh mppi     # mppi만 빌드
+#   bash build_gpu.sh             # manipulator GPU 예제 빌드
+#   bash build_gpu.sh quadrotor   # quadrotor GPU 예제 빌드
+#   bash build_gpu.sh wmrobot     # wmrobot GPU 예제 빌드
+#   bash build_gpu.sh velo        # velo GPU 예제 빌드
 # ============================================================
 set -e
 

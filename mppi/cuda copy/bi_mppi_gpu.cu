@@ -38,7 +38,15 @@ __global__ void backward_rollout_kernel(
             double raw = d_Ub0[d*T+t] + d_sigma[d]*d_noise[i*(dim_u*T)+d*T+t];
             Ui_i[d*T+t] = raw;
         }
-    legacy_cuda_project_control(Ui_i, dim_u, T, model_type);
+    if (model_type == 0) {
+        h_wmrobot(Ui_i, T);
+    } else if (model_type == 1) {
+        h_quadrotor(Ui_i, T);
+    } else if (model_type == 2) {
+        h_velo(Ui_i, T);
+    } else if (model_type == 3) {
+        h_manipulator(Ui_i, dim_u, T);
+    }
 
     double* Di_i = d_Di + i * dim_u;
     for (int d = 0; d < dim_u; ++d) {
@@ -52,29 +60,65 @@ __global__ void backward_rollout_kernel(
 
     double cost = 0.0;
     bool hit = false;
-    if (legacy_cuda_collision_grid(x, with_map, d_map, max_row, max_col, res,
-                                   d_circles, n_circ, d_rects, n_rect)) {
-        hit = true; cost = 1e8;
-    }
 
     for (int j = T-1; j >= 0; --j) {
-        if (hit) break;
-        double u_local[GPU_MAX_DIM_U];
-        for (int _d = 0; _d < dim_u; ++_d) {
-            if (j == T-1) u_local[_d] = Ui_i[_d*T+j];
-            else          u_local[_d] = Ui_i[_d*T+j+1];
+        if (model_type == 0) {
+            double v, omega;
+            if (j == T-1) { v = Ui_i[0*T+j]; omega = Ui_i[1*T+j]; }
+            else           { v = Ui_i[0*T+j+1]; omega = Ui_i[1*T+j+1]; }
+
+            cost += p_wmrobot(x, d_x_init, dim_x);
+            f_wmrobot(x, v, omega, xd_);
+        } else if (model_type == 1) {
+            double u_val[3];
+            if (j == T-1) {
+                u_val[0] = Ui_i[0*T+j]; u_val[1] = Ui_i[1*T+j]; u_val[2] = Ui_i[2*T+j];
+            } else {
+                u_val[0] = Ui_i[0*T+j+1]; u_val[1] = Ui_i[1*T+j+1]; u_val[2] = Ui_i[2*T+j+1];
+            }
+
+            cost += p_quadrotor(x, d_x_init, dim_x);
+            f_quadrotor(x, u_val, xd_);
+        } else if (model_type == 2) {
+            double u_val[2];
+            if (j == T-1) {
+                u_val[0] = Ui_i[0*T+j]; u_val[1] = Ui_i[1*T+j];
+            } else {
+                u_val[0] = Ui_i[0*T+j+1]; u_val[1] = Ui_i[1*T+j+1];
+            }
+
+            cost += p_velo(x, d_x_init, dim_x);
+            f_velo(x, u_val, xd_);
+        } else if (model_type == 3) {
+            double u_manip[GPU_MAX_DIM_U];
+            for (int _d = 0; _d < dim_u; ++_d) {
+                if (j == T-1) u_manip[_d] = Ui_i[_d*T+j];
+                else          u_manip[_d] = Ui_i[_d*T+j+1];
+            }
+            cost += p_manipulator(x, d_x_init, dim_x);
+            f_manipulator(x, u_manip, xd_, dim_u);
         }
-        legacy_cuda_dynamics(x, u_local, xd_, dim_x, dim_u, model_type);
         for (int d = 0; d < dim_x; ++d) xn[d] = x[d] - dt * xd_[d];
-        for (int d = 0; d < dim_x; ++d) x[d] = xn[d];
-        cost += legacy_cuda_terminal_cost(x, d_x_init, dim_x, model_type);
-        if (legacy_cuda_collision_grid(x, with_map, d_map, max_row, max_col, res,
-                                       d_circles, n_circ, d_rects, n_rect)) {
+
+        if (!hit && check_collision(x, with_map, d_map, max_row, max_col, res,
+                                    d_circles, n_circ, d_rects, n_rect, model_type)) {
             hit = true; cost = 1e8;
         }
+        for (int d = 0; d < dim_x; ++d) x[d] = xn[d];
     }
     if (!hit) {
-        cost += legacy_cuda_terminal_cost(x, d_x_init, dim_x, model_type);
+        if (model_type == 0) {
+            cost += p_wmrobot(x, d_x_init, dim_x);
+        } else if (model_type == 1) {
+            cost += p_quadrotor(x, d_x_init, dim_x);
+        } else if (model_type == 2) {
+            cost += p_velo(x, d_x_init, dim_x);
+        } else if (model_type == 3) {
+            cost += p_manipulator(x, d_x_init, dim_x);
+        }
+        if (check_collision(x, with_map, d_map, max_row, max_col, res,
+                            d_circles, n_circ, d_rects, n_rect, model_type))
+            cost = 1e8;
     }
     d_costs[i] = cost;
 }
@@ -105,49 +149,96 @@ __global__ void guide_rollout_kernel(
             Ui_i[d*Tr+t] = d_Ur0[d*Tr+t] +
                             d_sigma[d]*d_noise[i*(dim_u*Tr)+d*Tr+t];
         }
-    legacy_cuda_project_control(Ui_i, dim_u, Tr, model_type);
+    if (model_type == 0) {
+        h_wmrobot(Ui_i, Tr);
+    } else if (model_type == 1) {
+        h_quadrotor(Ui_i, Tr);
+    } else if (model_type == 2) {
+        h_velo(Ui_i, Tr);
+    } else if (model_type == 3) {
+        h_manipulator(Ui_i, dim_u, Tr);
+    }
 
     double x[GPU_MAX_DIM_X], xn[GPU_MAX_DIM_X], xd_[GPU_MAX_DIM_X];
     for (int d = 0; d < dim_x; ++d) x[d] = d_x_init[d];
 
     double cost = 0.0;
     bool hit = false;
-    double guide_cost = 0.0;
-    if (legacy_cuda_collision_grid(x, with_map, d_map, max_row, max_col, res,
-                                   d_circles, n_circ, d_rects, n_rect)) {
-        hit = true; cost = 1e8;
-    }
 
     for (int t = 0; t < Tr; ++t) {
-        if (hit) break;
-        cost += legacy_cuda_terminal_cost(x, d_x_target, dim_x, model_type);
-        double gc = 0.0;
-        for (int d = 0; d < dim_x; ++d) {
-            double diff = x[d] - d_Xref[d*(Tr+1)+t];
-            gc += diff*diff;
+        if (model_type == 0) {
+            double v = Ui_i[0*Tr+t], omega = Ui_i[1*Tr+t];
+            cost += p_wmrobot(x, d_x_target, dim_x);
+            // guide cost: distance to reference trajectory
+            double gc = 0.0;
+            for (int d = 0; d < dim_x; ++d) {
+                double diff = x[d] - d_Xref[d*(Tr+1)+t];
+                gc += diff*diff;
+            }
+            cost += sqrt(gc);
+
+            f_wmrobot(x, v, omega, xd_);
+        } else if (model_type == 1) {
+            double u_val[3] = { Ui_i[0*Tr+t], Ui_i[1*Tr+t], Ui_i[2*Tr+t] };
+            cost += p_quadrotor(x, d_x_target, dim_x);
+            // guide cost: distance to reference trajectory
+            double gc = 0.0;
+            for (int d = 0; d < dim_x; ++d) {
+                double diff = x[d] - d_Xref[d*(Tr+1)+t];
+                gc += diff*diff;
+            }
+            cost += sqrt(gc);
+
+            f_quadrotor(x, u_val, xd_);
+        } else if (model_type == 2) {
+            double u_val[2] = { Ui_i[0*Tr+t], Ui_i[1*Tr+t] };
+            cost += p_velo(x, d_x_target, dim_x);
+            // guide cost: distance to reference trajectory
+            double gc = 0.0;
+            for (int d = 0; d < dim_x; ++d) {
+                double diff = x[d] - d_Xref[d*(Tr+1)+t];
+                gc += diff*diff;
+            }
+            cost += sqrt(gc);
+
+            f_velo(x, u_val, xd_);
+        } else if (model_type == 3) {
+            double u_manip[GPU_MAX_DIM_U];
+            for (int _d = 0; _d < dim_u; ++_d) u_manip[_d] = Ui_i[_d*Tr+t];
+            cost += p_manipulator(x, d_x_target, dim_x);
+            double gc = 0.0;
+            for (int d = 0; d < dim_x; ++d) {
+                double diff = x[d] - d_Xref[d*(Tr+1)+t];
+                gc += diff*diff;
+            }
+            cost += sqrt(gc);
+            f_manipulator(x, u_manip, xd_, dim_u);
         }
-        guide_cost += sqrt(gc);
-        double u_local[GPU_MAX_DIM_U];
-        for (int _d = 0; _d < dim_u; ++_d) u_local[_d] = Ui_i[_d*Tr+t];
-        legacy_cuda_dynamics(x, u_local, xd_, dim_x, dim_u, model_type);
         for (int d = 0; d < dim_x; ++d) xn[d] = x[d] + dt*xd_[d];
 
-        for (int d = 0; d < dim_x; ++d) x[d] = xn[d];
-        if (legacy_cuda_collision_grid(x, with_map, d_map, max_row, max_col,
-                                       res, d_circles, n_circ, d_rects,
-                                       n_rect)) {
+        if (!hit && check_collision(x, with_map, d_map, max_row, max_col, res,
+                                    d_circles, n_circ, d_rects, n_rect, model_type)) {
             hit = true; cost = 1e8;
         }
+        for (int d = 0; d < dim_x; ++d) x[d] = xn[d];
     }
     if (!hit) {
-        double gc = 0.0;
-        for (int d = 0; d < dim_x; ++d) {
-            double diff = x[d] - d_Xref[d*(Tr+1)+Tr];
-            gc += diff*diff;
+        if (model_type == 0) {
+            cost += p_wmrobot(x, d_x_target, dim_x);
+            cost += p_wmrobot(x, d_x_target, dim_x);
+        } else if (model_type == 1) {
+            cost += p_quadrotor(x, d_x_target, dim_x);
+            cost += p_quadrotor(x, d_x_target, dim_x);
+        } else if (model_type == 2) {
+            cost += p_velo(x, d_x_target, dim_x);
+            cost += p_velo(x, d_x_target, dim_x);
+        } else if (model_type == 3) {
+            cost += p_manipulator(x, d_x_target, dim_x);
+            cost += p_manipulator(x, d_x_target, dim_x);
         }
-        guide_cost += sqrt(gc);
-        cost = legacy_cuda_terminal_cost(x, d_x_target, dim_x, model_type);
-        cost += guide_cost;
+        if (check_collision(x, with_map, d_map, max_row, max_col, res,
+                            d_circles, n_circ, d_rects, n_rect, model_type))
+            cost = 1e8;
     }
     d_costs[i] = cost;
 }
@@ -220,7 +311,7 @@ void BiMPPI_GPU::init(BiMPPIParam p) {
     Nf = p.Nf; Nb = p.Nb; Nr = p.Nr;
     gamma_u = p.gamma_u;
     x_init = p.x_init; x_target = p.x_target;
-    deviation_mu = p.deviation_mu; cost_mu = p.cost_mu; epsilon = p.epsilon;
+    deviation_mu = p.deviation_mu; epsilon = p.epsilon;
     minpts = p.minpts; psi = p.psi;
 
     sigma_diag.resize(dim_u);
@@ -261,13 +352,27 @@ void BiMPPI_GPU::uploadCollisionData() {
                 flat[r*map_max_col+c]=collision_checker->map[r][c];
         CUDA_CHECK(cudaMemcpy(d_map,flat.data(),sz,cudaMemcpyHostToDevice));
     }
-    n_circles=(int)collision_checker->circles.size();
-    if (n_circles>0) {
-        size_t sz=n_circles*4*sizeof(double);
-        safe_cuda_malloc(&d_circles,sz);
-        std::vector<double> buf(n_circles*4);
-        for (int i=0;i<n_circles;++i) for(int j=0;j<4;++j) buf[i*4+j]=collision_checker->circles[i][j];
-        CUDA_CHECK(cudaMemcpy(d_circles,buf.data(),sz,cudaMemcpyHostToDevice));
+    // Circles / Cylinders
+    if (model_type == 3) {
+        n_circles = (int)collision_checker->cylinders_3d.size();
+        if (n_circles > 0) {
+            size_t sz = n_circles * 6 * sizeof(double);
+            safe_cuda_malloc(&d_circles, sz);
+            std::vector<double> buf(n_circles * 6);
+            for (int i = 0; i < n_circles; ++i)
+                for (int j = 0; j < 6; ++j)
+                    buf[i * 6 + j] = collision_checker->cylinders_3d[i][j];
+            CUDA_CHECK(cudaMemcpy(d_circles, buf.data(), sz, cudaMemcpyHostToDevice));
+        }
+    } else {
+        n_circles=(int)collision_checker->circles.size();
+        if (n_circles>0) {
+            size_t sz=n_circles*4*sizeof(double);
+            safe_cuda_malloc(&d_circles,sz);
+            std::vector<double> buf(n_circles*4);
+            for (int i=0;i<n_circles;++i) for(int j=0;j<4;++j) buf[i*4+j]=collision_checker->circles[i][j];
+            CUDA_CHECK(cudaMemcpy(d_circles,buf.data(),sz,cudaMemcpyHostToDevice));
+        }
     }
     n_rects=(int)collision_checker->rectangles.size();
     if (n_rects>0) {
@@ -361,7 +466,7 @@ void BiMPPI_GPU::forwardRollout() {
     int B=256,G=(Nf+B-1)/B;
     bi_rollout_kernel<<<G,B>>>(d_Uf0,d_Ufi,d_noise_f,d_sigma,d_x_init,d_x_target,
         d_costs_f,d_Di_f,with_map,d_map,map_max_row,map_max_col,map_resolution,
-        d_circles,n_circles,d_rects,n_rects,Nf,dim_u,dim_x,Tf,(double)dt,gamma_u,model_type,true);
+        d_circles,n_circles,d_rects,n_rects,Nf,dim_u,dim_x,Tf,(double)dt,gamma_u,model_type);
     CUDA_CHECK(cudaGetLastError()); CUDA_CHECK(cudaDeviceSynchronize());
     auto t1=std::chrono::high_resolution_clock::now();
     elapsed_rollout+=std::chrono::duration<double>(t1-t0).count();
@@ -393,8 +498,6 @@ void BiMPPI_GPU::forwardRollout() {
 void BiMPPI_GPU::backwardRollout() {
     auto t0=std::chrono::high_resolution_clock::now();
     auto bf=eigen_to_flat(U_b0,dim_u,Tb);
-    CUDA_CHECK(cudaMemcpy(d_x_init,  x_init.data(),  dim_x*sizeof(double),cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_x_target,x_target.data(),dim_x*sizeof(double),cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemcpy(d_Ub0,bf.data(),dim_u*Tb*sizeof(double),cudaMemcpyHostToDevice));
     size_t nc=(size_t)Nb*dim_u*Tb; if(nc%2)nc++;
     CURAND_CHECK(curandGenerateNormalDouble(curand_gen,d_noise_b,nc,0.0,1.0));

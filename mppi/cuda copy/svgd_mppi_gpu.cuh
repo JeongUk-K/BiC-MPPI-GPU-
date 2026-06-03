@@ -2,9 +2,9 @@
 
 #include "collision_checker.h"
 #include "cuda_utils.cuh"
-#include "mppi_vis_logger.h"
 #include "model_base.h"
 #include "mppi_param.h"
+#include "mppi_vis_logger.h"
 
 #include <Eigen/Dense>
 #include <chrono>
@@ -12,27 +12,29 @@
 #include <deque>
 #include <map>
 #include <numeric>
-#include <typeinfo>
 #include <vector>
 
 // ============================================================
-// BiMPPI_GPU — Bidirectional MPPI with GPU rollout
+// SVGDMPPI_GPU
 //
-// Forward/backward rollout + guide MPPI on GPU.
-// DBSCAN, selectConnection, concatenate stay on CPU.
+// SVGD-MPPI GPU 가속 버전.
+// 아키텍처:
+//   - Forward / Backward rollout의 비용 평가 → GPU 커널
+//   - SVGD surrogate gradient step → GPU 커널 (particle별 병렬)
+//   - DBSCAN 클러스터링 / selectConnection / guideMPPI → CPU Eigen
 // ============================================================
-class BiMPPI_GPU {
+class SVGDMPPI_GPU {
 public:
-  template <typename ModelClass> BiMPPI_GPU(ModelClass model);
-  ~BiMPPI_GPU();
+  template <typename ModelClass> SVGDMPPI_GPU(ModelClass model);
+  ~SVGDMPPI_GPU();
 
-  void init(BiMPPIParam param);
+  void init(SVGDMPPIParam param);
   void setCollisionChecker(CollisionChecker *cc);
   void solve();
   void move();
   void setVisLogger(MPPIVisLogger *logger) { vis_logger = logger; }
 
-  // ---- Public state (mirrors CPU BiMPPI) ----
+  // ── 공개 상태 (CPU BiMPPI와 동일 인터페이스) ──
   Eigen::MatrixXd U_f0; // dim_u x Tf
   Eigen::MatrixXd U_b0; // dim_u x Tb
   Eigen::VectorXd x_init;
@@ -53,16 +55,19 @@ protected:
   int dim_x, dim_u;
   float dt;
   int Tf, Tb, Nf, Nb, Nr;
-  double gamma_u;
-  std::vector<double> sigma_diag;
-  double deviation_mu, cost_mu, epsilon;
-  int minpts;
-  double psi;
+  int Ns;    // surrogate samples
+  int istep; // SVGD inner iterations
 
-  CollisionChecker *collision_checker;
+  double gamma_u;
+  std::vector<double> sigma_diag; // diagonal of sigma_u
+
+  double deviation_mu, epsilon, psi, cost_mu;
+  int minpts;
+
+  CollisionChecker *collision_checker{nullptr};
   MPPIVisLogger *vis_logger = nullptr;
 
-  // CPU cluster data
+  // CPU-side cluster / traj data
   std::vector<std::vector<int>> clusters_f, clusters_b;
   std::vector<int> full_cluster_f, full_cluster_b;
   Eigen::MatrixXd Uf, Ub, Xf, Xb;
@@ -71,23 +76,24 @@ protected:
   std::vector<Eigen::MatrixXd> Ur, Xr;
   std::vector<double> Cr;
 
-  // GPU buffers (forward)
-  double *d_Uf0, *d_Ufi, *d_noise_f, *d_costs_f, *d_Uf_out, *d_Di_f;
-  // GPU buffers (backward)
-  double *d_Ub0, *d_Ubi, *d_noise_b, *d_costs_b, *d_Ub_out, *d_Di_b;
-  // GPU buffers (guide)
-  double *d_Ur0, *d_Uri, *d_noise_r, *d_costs_r, *d_Ur_out, *d_Xref;
-
+  // GPU buffers – forward
+  double *d_Uf0, *d_Ufi, *d_noise_f, *d_costs_f, *d_Di_f;
+  double *d_noise_samples_f, *d_sample_costs_f, *d_cov_acc_f;
+  // GPU buffers – backward
+  double *d_Ub0, *d_Ubi, *d_noise_b, *d_costs_b, *d_Di_b;
+  double *d_noise_samples_b, *d_sample_costs_b, *d_cov_acc_b;
+  // GPU buffers – guide
+  double *d_Ur0, *d_Uri, *d_noise_r, *d_costs_r, *d_Xref;
+  // shared
   double *d_x_init, *d_x_target, *d_sigma;
-
-  // Collision
+  // collision
   double *d_map, *d_circles, *d_rects;
   int map_max_row, map_max_col, n_circles, n_rects;
   double map_resolution;
   bool with_map;
-  curandGenerator_t curand_gen;
 
-  int alloc_Nf, alloc_Nb, alloc_Tf, alloc_Tb; // last allocated sizes
+  curandGenerator_t curand_gen;
+  int alloc_Nf, alloc_Nb, alloc_Tf, alloc_Tb;
 
   // ---- Model-independent callbacks & type ----
   int model_type;
@@ -96,6 +102,7 @@ protected:
   std::function<double(Eigen::VectorXd, Eigen::VectorXd)> p;
   std::function<void(Eigen::Ref<Eigen::MatrixXd>)> h;
 
+  // GPU 메모리 관리
   void allocForward();
   void allocBackward();
   void allocGuide();
@@ -105,13 +112,15 @@ protected:
   void freeCommon();
   void uploadCollisionData();
 
-  void backwardRollout();
+  // 핵심 단계
   void forwardRollout();
+  void backwardRollout();
   void selectConnection();
   void concatenate();
   void guideMPPI();
   void partitioningControl();
 
+  // CPU 클러스터링 (DBSCAN)
   void dbscan(std::vector<std::vector<int>> &clusters,
               const Eigen::MatrixXd &Di, const Eigen::VectorXd &costs,
               int N_samples);
@@ -121,7 +130,8 @@ protected:
                   int T_steps);
 };
 
-template <typename ModelClass> BiMPPI_GPU::BiMPPI_GPU(ModelClass model) {
+// ── 템플릿 생성자 ─────────────────────────────────────────────
+template <typename ModelClass> SVGDMPPI_GPU::SVGDMPPI_GPU(ModelClass model) {
   dim_x = model.dim_x;
   dim_u = model.dim_u;
   this->f = model.f;
@@ -129,12 +139,18 @@ template <typename ModelClass> BiMPPI_GPU::BiMPPI_GPU(ModelClass model) {
   this->p = model.p;
   this->h = model.h;
 
-  model_type =
-      legacy_cuda_model_type_from_name(typeid(ModelClass).name(), dim_x, dim_u);
+  if (dim_x == 6 && dim_u == 3) {
+    model_type = 1; // Quadrotor
+  } else if (dim_x == 4 && dim_u == 2) {
+    model_type = 2; // Velo
+  } else if (dim_x == 6 && dim_u == 6) {
+    model_type = 3; // Manipulator (6-DOF velocity control)
+  } else {
+    model_type = 0; // WMRobot
+  }
 
-  d_Uf0 = d_Ufi = d_noise_f = d_costs_f = d_Uf_out = d_Di_f = nullptr;
-  d_Ub0 = d_Ubi = d_noise_b = d_costs_b = d_Ub_out = d_Di_b = nullptr;
-  d_Ur0 = d_Uri = d_noise_r = d_costs_r = d_Ur_out = d_Xref = nullptr;
+  d_Uf0 = d_Ufi = d_noise_f = d_costs_f = d_Di_f = nullptr;
+  d_Ub0 = d_Ubi = d_noise_b = d_costs_b = d_Di_b = nullptr;
   d_x_init = d_x_target = d_sigma = nullptr;
   d_map = d_circles = d_rects = nullptr;
   n_circles = n_rects = 0;

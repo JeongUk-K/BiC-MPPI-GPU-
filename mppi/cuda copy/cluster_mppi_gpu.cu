@@ -143,7 +143,7 @@ void ClusterMPPI_GPU::solve() {
       d_costs, d_Di,
       with_map, d_map, map_max_row, map_max_col, map_resolution,
       d_circles, n_circles, d_rects, n_rects,
-      N, dim_u, dim_x, T, (double)dt, gamma_u, model_type, false);
+      N, dim_u, dim_x, T, (double)dt, gamma_u, model_type);
   CUDA_CHECK(cudaGetLastError());
   CUDA_CHECK(cudaDeviceSynchronize());
 

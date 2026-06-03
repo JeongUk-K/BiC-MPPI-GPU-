@@ -5,8 +5,6 @@
 #include <cuda_runtime.h>
 #include <curand.h>
 
-#include "cuda_legacy_model.cuh"
-
 // ============================================================
 // CUDA Error Macros
 // ============================================================
@@ -456,7 +454,7 @@ __device__ __forceinline__ double warp_reduce_sum(double val) {
       bool with_map, const double *d_map, int max_row, int max_col,            \
       double res, const double *d_circles, int n_circ, const double *d_rects,  \
       int n_rect, int N, int dim_u, int dim_x, int T, double dt,               \
-      double gamma_u, int model_type, bool check_initial_collision) {          \
+      double gamma_u, int model_type) {                                        \
     int i = blockIdx.x * blockDim.x + threadIdx.x;                             \
     if (i >= N)                                                                \
       return;                                                                  \
@@ -465,7 +463,15 @@ __device__ __forceinline__ double warp_reduce_sum(double val) {
       for (int t = 0; t < T; ++t)                                              \
         Ui_i[d * T + t] = d_U0[d * T + t] +                                    \
                           d_sigma[d] * d_noise[i * (dim_u * T) + d * T + t];   \
-    legacy_cuda_project_control(Ui_i, dim_u, T, model_type);                   \
+    if (model_type == 0) {                                                     \
+      h_wmrobot(Ui_i, T);                                                      \
+    } else if (model_type == 1) {                                              \
+      h_quadrotor(Ui_i, T);                                                    \
+    } else if (model_type == 2) {                                              \
+      h_velo(Ui_i, T);                                                         \
+    } else if (model_type == 3) {                                              \
+      h_manipulator(Ui_i, dim_u, T);                                           \
+    }                                                                          \
     double *Di_i = d_Di + i * dim_u;                                           \
     for (int d = 0; d < dim_u; ++d) {                                          \
       double acc = 0.0;                                                        \
@@ -478,33 +484,61 @@ __device__ __forceinline__ double warp_reduce_sum(double val) {
       x[d] = d_x_init[d];                                                      \
     double cost = 0.0;                                                         \
     bool hit = false;                                                          \
-    if (check_initial_collision &&                                             \
-        legacy_cuda_collision_grid(x, with_map, d_map, max_row, max_col, res,  \
-                                  d_circles, n_circ, d_rects, n_rect)) {       \
-      hit = true;                                                              \
-      cost = 1e8;                                                              \
-    }                                                                          \
     for (int t = 0; t < T; ++t) {                                              \
-      if (hit)                                                                 \
-        break;                                                                 \
-      cost += legacy_cuda_terminal_cost(x, d_x_target, dim_x, model_type);     \
-      double u_local[GPU_MAX_DIM_U];                                           \
-      for (int _d = 0; _d < dim_u; ++_d)                                       \
-        u_local[_d] = Ui_i[_d * T + t];                                        \
-      legacy_cuda_dynamics(x, u_local, xd_, dim_x, dim_u, model_type);         \
+      if (model_type == 0) {                                                   \
+        cost += p_wmrobot(x, d_x_target, dim_x);                               \
+        double v = Ui_i[0 * T + t], omega = Ui_i[1 * T + t];                   \
+        f_wmrobot(x, v, omega, xd_);                                           \
+      } else if (model_type == 1) {                                            \
+        cost += p_quadrotor(x, d_x_target, dim_x);                             \
+        double u_val[3] = {Ui_i[0 * T + t], Ui_i[1 * T + t], Ui_i[2 * T + t]}; \
+        f_quadrotor(x, u_val, xd_);                                            \
+      } else if (model_type == 2) {                                            \
+        cost += p_velo(x, d_x_target, dim_x);                                  \
+        double u_val2[2] = {Ui_i[0 * T + t], Ui_i[1 * T + t]};                 \
+        f_velo(x, u_val2, xd_);                                                \
+      } else if (model_type == 3) {                                            \
+        cost += p_manipulator(x, d_x_target, dim_x);                           \
+        double joint_pos[7][3];                                                \
+        compute_fk_positions_gpu(x, joint_pos);                                \
+        cost += compute_manipulator_obs_cost_gpu(joint_pos, d_circles, n_circ); \
+        const double q_min[6] = {-2.0 * M_PI, -2.0 * M_PI, -165.0 * M_PI / 180.0, -2.0 * M_PI, -2.0 * M_PI, -2.0 * M_PI}; \
+        const double q_max[6] = {2.0 * M_PI, 2.0 * M_PI, 165.0 * M_PI / 180.0, 2.0 * M_PI, 2.0 * M_PI, 2.0 * M_PI}; \
+        for (int j = 0; j < 6; ++j) {                                          \
+          double qr = (q_max[j] - q_min[j]) * 0.5;                             \
+          double qc = (q_max[j] + q_min[j]) * 0.5;                             \
+          double norm = (x[j] - qc) / (qr * 0.8);                              \
+          if (fabs(norm) > 1.0)                                                \
+            cost += 5.0 * (fabs(norm) - 1.0) * (fabs(norm) - 1.0);             \
+        }                                                                      \
+        double u_manip[GPU_MAX_DIM_U];                                          \
+        for (int _d = 0; _d < dim_u; ++_d)                                     \
+          u_manip[_d] = Ui_i[_d * T + t];                                      \
+        f_manipulator(x, u_manip, xd_, dim_u);                                 \
+      }                                                                        \
       for (int d = 0; d < dim_x; ++d)                                          \
         xn[d] = x[d] + dt * xd_[d];                                            \
-      for (int d = 0; d < dim_x; ++d)                                          \
-        x[d] = xn[d];                                                          \
-      if (legacy_cuda_collision_grid(x, with_map, d_map, max_row, max_col,     \
-                                     res, d_circles, n_circ, d_rects,          \
-                                     n_rect)) {                                \
+      if (!hit && check_collision(x, with_map, d_map, max_row, max_col, res,   \
+                                  d_circles, n_circ, d_rects, n_rect, model_type)) { \
         hit = true;                                                            \
         cost = 1e8;                                                            \
       }                                                                        \
+      for (int d = 0; d < dim_x; ++d)                                          \
+        x[d] = xn[d];                                                          \
     }                                                                          \
     if (!hit) {                                                                \
-      cost += legacy_cuda_terminal_cost(x, d_x_target, dim_x, model_type);     \
+      if (model_type == 0) {                                                   \
+        cost += p_wmrobot(x, d_x_target, dim_x);                               \
+      } else if (model_type == 1) {                                            \
+        cost += p_quadrotor(x, d_x_target, dim_x);                             \
+      } else if (model_type == 2) {                                            \
+        cost += p_velo(x, d_x_target, dim_x);                                  \
+      } else if (model_type == 3) {                                            \
+        cost += p_manipulator(x, d_x_target, dim_x);                           \
+      }                                                                        \
+      if (check_collision(x, with_map, d_map, max_row, max_col, res,           \
+                          d_circles, n_circ, d_rects, n_rect, model_type))     \
+        cost = 1e8;                                                            \
     }                                                                          \
     d_costs[i] = cost;                                                         \
   }

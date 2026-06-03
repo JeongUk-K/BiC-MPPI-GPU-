@@ -49,7 +49,16 @@ __global__ void log_mppi_rollout_kernel(
       Ui_i[d * T + t] = d_U0[d * T + t] + d_sigma[d] * eta * log_factor;
     }
 
-  legacy_cuda_project_control(Ui_i, dim_u, T, model_type);
+  // Clamp controls
+  if (model_type == 0) {
+    h_wmrobot(Ui_i, T);
+  } else if (model_type == 1) {
+    h_quadrotor(Ui_i, T);
+  } else if (model_type == 2) {
+    h_velo(Ui_i, T);
+  } else if (model_type == 3) {
+    h_manipulator(Ui_i, dim_u, T);
+  }
 
   // Mean deviation Di
   double* Di_i = d_Di + i * dim_u;
@@ -66,20 +75,44 @@ __global__ void log_mppi_rollout_kernel(
   bool hit = false;
 
   for (int t = 0; t < T; ++t) {
-    if (hit) break;
-    cost += legacy_cuda_terminal_cost(x, d_x_target, dim_x, model_type);
-    double u_local[GPU_MAX_DIM_U];
-    for (int _d = 0; _d < dim_u; ++_d) u_local[_d] = Ui_i[_d * T + t];
-    legacy_cuda_dynamics(x, u_local, xd_, dim_x, dim_u, model_type);
+    if (model_type == 0) {
+      cost += p_wmrobot(x, d_x_target, dim_x);
+      double v = Ui_i[0 * T + t], omega = Ui_i[1 * T + t];
+      f_wmrobot(x, v, omega, xd_);
+    } else if (model_type == 1) {
+      cost += p_quadrotor(x, d_x_target, dim_x);
+      double u_val[3] = { Ui_i[0 * T + t], Ui_i[1 * T + t], Ui_i[2 * T + t] };
+      f_quadrotor(x, u_val, xd_);
+    } else if (model_type == 2) {
+      cost += p_velo(x, d_x_target, dim_x);
+      double u_v[2] = { Ui_i[0 * T + t], Ui_i[1 * T + t] };
+      f_velo(x, u_v, xd_);
+    } else if (model_type == 3) {
+      cost += p_manipulator(x, d_x_target, dim_x);
+      double u_manip[GPU_MAX_DIM_U];
+      for (int _d = 0; _d < dim_u; ++_d) u_manip[_d] = Ui_i[_d * T + t];
+      f_manipulator(x, u_manip, xd_, dim_u);
+    }
     for (int d = 0; d < dim_x; ++d) xn[d] = x[d] + dt * xd_[d];
-    for (int d = 0; d < dim_x; ++d) x[d] = xn[d];
-    if (legacy_cuda_collision_grid(x, with_map, d_map, max_row, max_col, res,
-                                   d_circles, n_circ, d_rects, n_rect)) {
+    if (!hit && check_collision(x, with_map, d_map, max_row, max_col, res,
+                                d_circles, n_circ, d_rects, n_rect)) {
       hit = true; cost = 1e8;
     }
+    for (int d = 0; d < dim_x; ++d) x[d] = xn[d];
   }
   if (!hit) {
-    cost += legacy_cuda_terminal_cost(x, d_x_target, dim_x, model_type);
+    if (model_type == 0) {
+      cost += p_wmrobot(x, d_x_target, dim_x);
+    } else if (model_type == 1) {
+      cost += p_quadrotor(x, d_x_target, dim_x);
+    } else if (model_type == 2) {
+      cost += p_velo(x, d_x_target, dim_x);
+    } else if (model_type == 3) {
+      cost += p_manipulator(x, d_x_target, dim_x);
+    }
+    if (check_collision(x, with_map, d_map, max_row, max_col, res,
+                        d_circles, n_circ, d_rects, n_rect))
+      cost = 1e8;
   }
   d_costs[i] = cost;
 }

@@ -12,7 +12,6 @@
 #include <deque>
 #include <map>
 #include <numeric>
-#include <typeinfo>
 #include <vector>
 
 // ============================================================
@@ -55,7 +54,7 @@ protected:
   int Tf, Tb, Nf, Nb, Nr;
   double gamma_u;
   std::vector<double> sigma_diag;
-  double deviation_mu, cost_mu, epsilon;
+  double deviation_mu, epsilon;
   int minpts;
   double psi;
 
@@ -129,8 +128,15 @@ template <typename ModelClass> BiMPPI_GPU::BiMPPI_GPU(ModelClass model) {
   this->p = model.p;
   this->h = model.h;
 
-  model_type =
-      legacy_cuda_model_type_from_name(typeid(ModelClass).name(), dim_x, dim_u);
+  if (dim_x == 6 && dim_u == 3) {
+    model_type = 1; // Quadrotor
+  } else if (dim_x == 4 && dim_u == 2) {
+    model_type = 2; // Velo
+  } else if (dim_x == 6 && dim_u == 6) {
+    model_type = 3; // Manipulator (6-DOF velocity control)
+  } else {
+    model_type = 0; // WMRobot
+  }
 
   d_Uf0 = d_Ufi = d_noise_f = d_costs_f = d_Uf_out = d_Di_f = nullptr;
   d_Ub0 = d_Ubi = d_noise_b = d_costs_b = d_Ub_out = d_Di_b = nullptr;
