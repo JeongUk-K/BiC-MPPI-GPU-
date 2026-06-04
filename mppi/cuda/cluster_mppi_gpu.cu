@@ -194,7 +194,12 @@ void ClusterMPPI_GPU::solve() {
       Xi.col(j + 1) = Xi.col(j) + (double)dt * f(Xi.col(j), U.block(ci * dim_u, j, dim_u, 1));
     }
     cost += p(Xi.col(T), x_target);
-    if (collision_checker->getCollisionGrid(Xi.col(T))) cost = 1e8;
+    for (int j = 1; j < T + 1; ++j) {
+      if (collision_checker->getCollisionGrid(Xi.col(j))) {
+        cost = 1e8;
+        break;
+      }
+    }
     if (cost < min_cost) { min_cost = cost; min_idx = ci; }
   }
 

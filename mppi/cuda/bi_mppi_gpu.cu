@@ -451,12 +451,18 @@ void BiMPPI_GPU::concatenate() {
     Uc.clear(); Xc.clear();
     for(auto& j:joints){
         int cf=j[0],cb=j[1],df=j[2],db=j[3],len=std::max(Tf,df+(Tb-db));
-        Eigen::MatrixXd U(dim_u,len); U.setZero();
-        Eigen::MatrixXd X(dim_x,len+1); X.setZero();
-        if(df>0) U.leftCols(df)=Uf.block(cf*dim_u,0,dim_u,df);
-        X.leftCols(df+1)=Xf.block(cf*dim_x,0,dim_x,df+1);
-        if(db!=Tb){ U.middleCols(df,Tb-db)=Ub.block(cb*dim_u,db,dim_u,Tb-db);
-                    X.middleCols(df+1,Tb-db)=Xb.block(cb*dim_x,db+1,dim_x,Tb-db); }
+        Eigen::MatrixXd U(dim_u,len);
+        Eigen::MatrixXd X(dim_x,len+1);
+        if(df==0) {
+            X.leftCols(df+1)=Xf.block(cf*dim_x,0,dim_x,df+1);
+        } else {
+            U.leftCols(df)=Uf.block(cf*dim_u,0,dim_u,df);
+            X.leftCols(df+1)=Xf.block(cf*dim_x,0,dim_x,df+1);
+        }
+        if(db!=Tb){
+            U.middleCols(df+1,Tb-db-1)=Ub.block(cb*dim_u,db+1,dim_u,Tb-db-1);
+            X.middleCols(df+2,Tb-db-1)=Xb.block(cb*dim_x,db+1,dim_x,Tb-db-1);
+        }
         if(df+(Tb-db)<Tf){ U.rightCols(Tf-(df+(Tb-db))).colwise()=dummy_u;
                            X.rightCols(Tf-(df+(Tb-db))).colwise()=x_target; }
         Uc.push_back(U); Xc.push_back(X);
@@ -496,7 +502,12 @@ void BiMPPI_GPU::guideMPPI() {
             cost+=p(Xi.col(t), x_target);
         }
         cost+=p(Xi.col(Tr), x_target);
-        if(collision_checker->getCollisionGrid(Xi.col(Tr))) cost=1e8;
+        for(int t=0;t<Tr+1;++t){
+            if(collision_checker->getCollisionGrid(Xi.col(t))){
+                cost=1e8;
+                break;
+            }
+        }
         Ur.push_back(Ures); Cr.push_back(cost); Xr.push_back(Xi);
     }
     double mn=std::numeric_limits<double>::max(); int idx=0;

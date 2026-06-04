@@ -2,8 +2,8 @@
 # ============================================================
 # build_gpu.sh — BiC-MPPI GPU 버전 빌드 스크립트
 #
-# 시스템에 CUDA toolkit이 /usr/local/cuda에 설치되어 있으면
-# 자동으로 감지합니다. 없으면 MATLAB 번들 nvcc를 사용합니다.
+# 시스템 CUDA toolkit을 우선 사용합니다. 없으면 MATLAB 번들 nvcc를
+# fallback으로 사용합니다.
 #
 # 사용법:
 #   bash build_gpu.sh             # manipulator GPU 예제 빌드
@@ -40,8 +40,30 @@ done
 # 2) apt 등으로 설치된 전역 nvcc 확인
 if [ -z "$NVCC" ] && command -v nvcc >/dev/null 2>&1; then
     NVCC=$(command -v nvcc)
-    CUDA_INCLUDE="/usr/include"
-    CUDA_LIBDIR="/usr/lib/x86_64-linux-gnu"
+    NVCC_ROOT="$(cd "$(dirname "$NVCC")/.." && pwd)"
+    if [ -f "$NVCC_ROOT/include/cuda_runtime.h" ]; then
+        CUDA_INCLUDE="$NVCC_ROOT/include"
+        if [ -d "$NVCC_ROOT/lib64" ]; then
+            CUDA_LIBDIR="$NVCC_ROOT/lib64"
+        else
+            CUDA_LIBDIR="/usr/lib/x86_64-linux-gnu"
+        fi
+    else
+        CUDA_INCLUDE="/usr/include"
+        CUDA_LIBDIR="/usr/lib/x86_64-linux-gnu"
+    fi
+fi
+
+# 3) MATLAB 번들 CUDA 확인
+if [ -z "$NVCC" ]; then
+    for d in /usr/local/MATLAB/R*/sys/cuda/glnxa64/cuda; do
+        if [ -f "$d/bin/nvcc" ]; then
+            NVCC="$d/bin/nvcc"
+            CUDA_INCLUDE="$d/include"
+            CUDA_LIBDIR="$d/lib64"
+            break
+        fi
+    done
 fi
 
 if [ -z "$NVCC" ]; then
@@ -50,15 +72,27 @@ if [ -z "$NVCC" ]; then
     exit 1
 fi
 
+NVCC_BIN_DIR="$(cd "$(dirname "$NVCC")" && pwd)"
+NVCC_ROOT="$(cd "$NVCC_BIN_DIR/.." && pwd)"
+export PATH="$NVCC_BIN_DIR:$NVCC_ROOT/nvvm/bin:$PATH"
+
+MATLAB_LIBDIR=""
+case "$NVCC" in
+    /usr/local/MATLAB/*/sys/cuda/glnxa64/cuda/bin/nvcc)
+        MATLAB_ROOT="${NVCC%/sys/cuda/glnxa64/cuda/bin/nvcc}"
+        MATLAB_LIBDIR="$MATLAB_ROOT/bin/glnxa64"
+        ;;
+esac
+
 # curand 탐색
 CURAND_LIB=""
-for lib in "$CUDA_LIBDIR/libcurand.so" "/usr/lib/x86_64-linux-gnu/libcurand.so"; do
+for lib in "$CUDA_LIBDIR"/libcurand.so* "$MATLAB_LIBDIR"/libcurand.so* "/usr/lib/x86_64-linux-gnu"/libcurand.so*; do
     if [ -f "$lib" ]; then CURAND_LIB="$lib"; break; fi
 done
 
 # cudart 탐색
 CUDART_LIB=""
-for lib in "$CUDA_LIBDIR/libcudart.so" "/usr/lib/x86_64-linux-gnu/libcudart.so"; do
+for lib in "$CUDA_LIBDIR"/libcudart.so* "$MATLAB_LIBDIR"/libcudart.so* "/usr/lib/x86_64-linux-gnu"/libcudart.so*; do
     if [ -f "$lib" ]; then CUDART_LIB="$lib"; break; fi
 done
 
