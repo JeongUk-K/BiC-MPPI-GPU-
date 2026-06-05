@@ -8,6 +8,7 @@
 #include "mppi_param.h"
 
 #include <chrono>
+#include <cstdint>
 #include <ctime>
 #include <iostream>
 #include <vector>
@@ -21,7 +22,11 @@ public:
 
   void init(MPPIParam mppi_param);
   void setCollisionChecker(CollisionChecker *collision_checker);
+  void setSeed(const std::uint_fast64_t &seed);
   virtual Eigen::MatrixXd getNoise(const int &T);
+  virtual Eigen::MatrixXd getNoise(const int &T, const int &sample_index,
+                                   const int &solve_index,
+                                   const int &phase_index);
   void move();
   virtual void solve();
   void show();
@@ -58,6 +63,9 @@ protected:
   std::mt19937_64 urng{static_cast<std::uint_fast64_t>(std::time(nullptr))};
   // std::mt19937_64 urng{1};
   Eigen::Rand::NormalGen<double> norm_gen{0.0, 1.0};
+  std::uint_fast64_t noise_seed{static_cast<std::uint_fast64_t>(
+      std::time(nullptr))};
+  int solve_count;
 
   // Parameters
   float dt;
@@ -96,14 +104,38 @@ void MPPI::init(MPPIParam mppi_param) {
 
   u0 = Eigen::VectorXd::Zero(dim_u);
   Xo = Eigen::MatrixXd::Zero(dim_x, T + 1);
+  solve_count = 0;
 }
 
 void MPPI::setCollisionChecker(CollisionChecker *collision_checker) {
   this->collision_checker = collision_checker;
 }
 
+void MPPI::setSeed(const std::uint_fast64_t &seed) {
+  noise_seed = seed;
+  urng.seed(seed);
+  solve_count = 0;
+}
+
 Eigen::MatrixXd MPPI::getNoise(const int &T) {
   return sigma_u * norm_gen.template generate<Eigen::MatrixXd>(dim_u, T, urng);
+}
+
+Eigen::MatrixXd MPPI::getNoise(const int &T, const int &sample_index,
+                               const int &solve_index,
+                               const int &phase_index) {
+  std::uint_fast64_t mixed = noise_seed;
+  mixed ^= 0x9e3779b97f4a7c15ULL + static_cast<std::uint_fast64_t>(sample_index) +
+           (mixed << 6) + (mixed >> 2);
+  mixed ^= 0xbf58476d1ce4e5b9ULL + static_cast<std::uint_fast64_t>(solve_index) +
+           (mixed << 6) + (mixed >> 2);
+  mixed ^= 0x94d049bb133111ebULL + static_cast<std::uint_fast64_t>(phase_index) +
+           (mixed << 6) + (mixed >> 2);
+
+  std::mt19937_64 local_urng(mixed);
+  Eigen::Rand::NormalGen<double> local_norm_gen{0.0, 1.0};
+  return sigma_u *
+         local_norm_gen.template generate<Eigen::MatrixXd>(dim_u, T, local_urng);
 }
 
 void MPPI::move() {
@@ -114,6 +146,7 @@ void MPPI::move() {
 void MPPI::solve() {
   // === Phase 1: Rollout + weight update ===
   start = std::chrono::high_resolution_clock::now();
+  const int solve_index = solve_count++;
 
   Eigen::MatrixXd Ui = U_0.replicate(N, 1);
   Eigen::VectorXd costs(N);
@@ -121,7 +154,7 @@ void MPPI::solve() {
 #pragma omp parallel for
   for (int i = 0; i < N; ++i) {
     Eigen::MatrixXd Xi(dim_x, T + 1);
-    Eigen::MatrixXd noise = getNoise(T);
+    Eigen::MatrixXd noise = getNoise(T, i, solve_index, 0);
     Ui.middleRows(i * dim_u, dim_u) += noise;
     h(Ui.middleRows(i * dim_u, dim_u));
 

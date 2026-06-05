@@ -8,6 +8,7 @@
 #include "mppi_param.h"
 
 #include <chrono>
+#include <cstdint>
 #include <ctime>
 #include <deque>
 #include <iostream>
@@ -24,7 +25,10 @@ public:
 
   void init(BiMPPIParam mppi_param);
   void setCollisionChecker(CollisionChecker *collision_checker);
+  void setSeed(const std::uint_fast64_t &seed);
   Eigen::MatrixXd getNoise(const int &T);
+  Eigen::MatrixXd getNoise(const int &T, const int &sample_index,
+                           const int &solve_index, const int &phase_index);
   void move();
   void solve();
   void backwardRollout();
@@ -86,6 +90,10 @@ private:
   std::mt19937_64 urng{static_cast<std::uint_fast64_t>(std::time(nullptr))};
   // std::mt19937_64 urng{1};
   Eigen::Rand::NormalGen<double> norm_gen{0.0, 1.0};
+  std::uint_fast64_t noise_seed{static_cast<std::uint_fast64_t>(
+      std::time(nullptr))};
+  int solve_count;
+  int current_solve_index;
 
   // Parameters
   float dt;
@@ -163,14 +171,40 @@ void BiMPPI::init(BiMPPIParam bi_mppi_param) {
 
   u0 = Eigen::VectorXd::Zero(dim_u);
   dummy_u = Eigen::VectorXd::Zero(dim_u);
+  solve_count = 0;
+  current_solve_index = 0;
 }
 
 void BiMPPI::setCollisionChecker(CollisionChecker *collision_checker) {
   this->collision_checker = collision_checker;
 }
 
+void BiMPPI::setSeed(const std::uint_fast64_t &seed) {
+  noise_seed = seed;
+  urng.seed(seed);
+  solve_count = 0;
+  current_solve_index = 0;
+}
+
 Eigen::MatrixXd BiMPPI::getNoise(const int &T) {
   return sigma_u * norm_gen.template generate<Eigen::MatrixXd>(dim_u, T, urng);
+}
+
+Eigen::MatrixXd BiMPPI::getNoise(const int &T, const int &sample_index,
+                                 const int &solve_index,
+                                 const int &phase_index) {
+  std::uint_fast64_t mixed = noise_seed;
+  mixed ^= 0x9e3779b97f4a7c15ULL + static_cast<std::uint_fast64_t>(sample_index) +
+           (mixed << 6) + (mixed >> 2);
+  mixed ^= 0xbf58476d1ce4e5b9ULL + static_cast<std::uint_fast64_t>(solve_index) +
+           (mixed << 6) + (mixed >> 2);
+  mixed ^= 0x94d049bb133111ebULL + static_cast<std::uint_fast64_t>(phase_index) +
+           (mixed << 6) + (mixed >> 2);
+
+  std::mt19937_64 local_urng(mixed);
+  Eigen::Rand::NormalGen<double> local_norm_gen{0.0, 1.0};
+  return sigma_u *
+         local_norm_gen.template generate<Eigen::MatrixXd>(dim_u, T, local_urng);
 }
 
 void BiMPPI::move() {
@@ -181,6 +215,7 @@ void BiMPPI::move() {
 
 void BiMPPI::solve() {
   omp_set_nested(1);
+  current_solve_index = solve_count++;
 
   elapsed_rollout = 0.0;
   elapsed_clustering = 0.0;
@@ -222,7 +257,7 @@ void BiMPPI::backwardRollout() {
 #pragma omp parallel for
   for (int i = 0; i < Nb; ++i) {
     Eigen::MatrixXd Xi(dim_x, Tb + 1);
-    Eigen::MatrixXd noise = getNoise(Tb);
+    Eigen::MatrixXd noise = getNoise(Tb, i, current_solve_index, 0);
     Ui.middleRows(i * dim_u, dim_u) += noise;
     h(Ui.middleRows(i * dim_u, dim_u));
 
@@ -296,7 +331,7 @@ void BiMPPI::forwardRollout() {
 #pragma omp parallel for
   for (int i = 0; i < Nf; ++i) {
     Eigen::MatrixXd Xi(dim_x, Tf + 1);
-    Eigen::MatrixXd noise = getNoise(Tf);
+    Eigen::MatrixXd noise = getNoise(Tf, i, current_solve_index, 1);
     Ui.middleRows(i * dim_u, dim_u) += noise;
     h(Ui.middleRows(i * dim_u, dim_u));
 
@@ -425,7 +460,7 @@ void BiMPPI::guideMPPI() {
 #pragma omp parallel for
     for (int i = 0; i < Nr; ++i) {
       Eigen::MatrixXd Xi(dim_x, Tr + 1);
-      Eigen::MatrixXd noise = getNoise(Tr);
+      Eigen::MatrixXd noise = getNoise(Tr, i, current_solve_index, 2 + r);
       Ui.middleRows(i * dim_u, dim_u) += noise;
       h(Ui.middleRows(i * dim_u, dim_u));
 
