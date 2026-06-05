@@ -50,3 +50,5 @@ add_cpu_target(src/wmrobot/rrt_connect.cpp)
 
 # ---- Parking (CPU) ----
 # add_cpu_target(src/parking/mppi.cpp)
+add_cpu_target(src/parking/parking_hybrid_mppi.cpp)
+add_cpu_target(src/parking/parking_hybrid_bi_mppi.cpp)
