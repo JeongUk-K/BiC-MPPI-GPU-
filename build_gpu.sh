@@ -9,6 +9,7 @@
 #   bash build_gpu.sh             # manipulator GPU 예제 빌드
 #   bash build_gpu.sh quadrotor   # quadrotor GPU 예제 빌드
 #   bash build_gpu.sh wmrobot     # wmrobot GPU 예제 빌드
+#   bash build_gpu.sh wmrobot_ablation  # wmrobot ablation GPU 예제 빌드
 #   bash build_gpu.sh velo        # velo GPU 예제 빌드
 # ============================================================
 set -e
@@ -202,6 +203,17 @@ case "$TARGET_GROUP" in
         build_target src/wmrobot/gpu/bi_mppi.cpp
         build_target src/wmrobot/gpu/svgd_mppi.cpp
         ;;
+    wmrobot_ablation)
+        # ---- WMRobot Ablation Study GPU 버전 ----
+        BUILD_PREFIX=""
+        build_target "src/wmrobot/Ablation study/GPU/wmrobot_ablation_gpu_mppi.cpp"
+        build_target "src/wmrobot/Ablation study/GPU/wmrobot_ablation_gpu_cluster_mppi.cpp"
+        build_target "src/wmrobot/Ablation study/GPU/wmrobot_ablation_gpu_bic_without_guide.cpp"
+        build_target "src/wmrobot/Ablation study/GPU/wmrobot_ablation_gpu_bic_without_backward.cpp"
+        build_target "src/wmrobot/Ablation study/GPU/wmrobot_ablation_gpu_bic_without_clustering.cpp"
+        build_target "src/wmrobot/Ablation study/GPU/wmrobot_ablation_gpu_full_bic_mppi.cpp"
+        build_target "src/wmrobot/Ablation study/GPU/wmrobot_ablation_gpu_all.cpp"
+        ;;
     velo)
         # ---- Velo GPU 버전 ----
         BUILD_PREFIX="velo_"
@@ -213,7 +225,7 @@ case "$TARGET_GROUP" in
         ;;
     *)
         echo "ERROR: unknown GPU target group: $TARGET_GROUP"
-        echo "Usage: bash build_gpu.sh [manipulator|quadrotor|wmrobot|velo]"
+        echo "Usage: bash build_gpu.sh [manipulator|quadrotor|wmrobot|wmrobot_ablation|velo]"
         exit 1
         ;;
 esac
@@ -241,6 +253,10 @@ if [ "$TARGET_GROUP" = "manipulator" ]; then
     echo "실행: cd build && ./gpu/mppi"
     echo "      cd build && ./gpu/bi_mppi"
     echo "      cd build && ./gpu/cluster_mppi"
+elif [ "$TARGET_GROUP" = "wmrobot_ablation" ]; then
+    echo "실행: cd build && ./gpu/wmrobot_ablation_gpu_all --smoke"
+    echo "      cd build && ./gpu/wmrobot_ablation_gpu_mppi"
+    echo "      cd build && ./gpu/wmrobot_ablation_gpu_full_bic_mppi"
 else
     echo "실행: cd build && ./gpu/${TARGET_GROUP}_mppi"
     echo "      cd build && ./gpu/${TARGET_GROUP}_bi_mppi"

@@ -297,6 +297,55 @@ static Eigen::MatrixXd flat_Di_to_eigen_col(const std::vector<double>& f, int N,
     return M;
 }
 
+// ── Raw rollout helpers for ablation variants ───────────────────
+void BiMPPI_GPU::forwardRawRollout(Eigen::VectorXd &costs,
+                                   Eigen::MatrixXd &Ui_cpu) {
+    auto t0=std::chrono::high_resolution_clock::now();
+    auto ff=eigen_to_flat(U_f0,dim_u,Tf);
+    CUDA_CHECK(cudaMemcpy(d_Uf0,ff.data(),dim_u*Tf*sizeof(double),cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_x_init,  x_init.data(),  dim_x*sizeof(double),cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_x_target,x_target.data(),dim_x*sizeof(double),cudaMemcpyHostToDevice));
+    size_t nc=(size_t)Nf*dim_u*Tf; if(nc%2)nc++;
+    CURAND_CHECK(curandGenerateNormalDouble(curand_gen,d_noise_f,nc,0.0,1.0));
+    int B=256,G=(Nf+B-1)/B;
+    bi_rollout_kernel<<<G,B>>>(d_Uf0,d_Ufi,d_noise_f,d_sigma,d_x_init,d_x_target,
+        d_costs_f,d_Di_f,with_map,d_map,map_max_row,map_max_col,map_resolution,
+        d_circles,n_circles,d_rects,n_rects,Nf,dim_u,dim_x,Tf,(double)dt,gamma_u,model_type,true);
+    CUDA_CHECK(cudaGetLastError()); CUDA_CHECK(cudaDeviceSynchronize());
+    auto t1=std::chrono::high_resolution_clock::now();
+    elapsed_rollout+=std::chrono::duration<double>(t1-t0).count();
+
+    std::vector<double> hc(Nf),hUi((size_t)Nf*dim_u*Tf);
+    CUDA_CHECK(cudaMemcpy(hc.data(), d_costs_f,Nf*sizeof(double),cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(hUi.data(),d_Ufi,(size_t)Nf*dim_u*Tf*sizeof(double),cudaMemcpyDeviceToHost));
+    costs=Eigen::Map<Eigen::VectorXd>(hc.data(),Nf);
+    Ui_cpu=flat_Ui_to_eigen(hUi,Nf,dim_u,Tf);
+}
+
+void BiMPPI_GPU::backwardRawRollout(Eigen::VectorXd &costs,
+                                    Eigen::MatrixXd &Ui_cpu) {
+    auto t0=std::chrono::high_resolution_clock::now();
+    auto bf=eigen_to_flat(U_b0,dim_u,Tb);
+    CUDA_CHECK(cudaMemcpy(d_x_init,  x_init.data(),  dim_x*sizeof(double),cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_x_target,x_target.data(),dim_x*sizeof(double),cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_Ub0,bf.data(),dim_u*Tb*sizeof(double),cudaMemcpyHostToDevice));
+    size_t nc=(size_t)Nb*dim_u*Tb; if(nc%2)nc++;
+    CURAND_CHECK(curandGenerateNormalDouble(curand_gen,d_noise_b,nc,0.0,1.0));
+    int B=256,G=(Nb+B-1)/B;
+    backward_rollout_kernel<<<G,B>>>(d_Ub0,d_Ubi,d_noise_b,d_sigma,d_x_init,d_x_target,
+        d_costs_b,d_Di_b,with_map,d_map,map_max_row,map_max_col,map_resolution,
+        d_circles,n_circles,d_rects,n_rects,Nb,dim_u,dim_x,Tb,(double)dt,gamma_u,model_type);
+    CUDA_CHECK(cudaGetLastError()); CUDA_CHECK(cudaDeviceSynchronize());
+    auto t1=std::chrono::high_resolution_clock::now();
+    elapsed_rollout+=std::chrono::duration<double>(t1-t0).count();
+
+    std::vector<double> hc(Nb),hUi((size_t)Nb*dim_u*Tb);
+    CUDA_CHECK(cudaMemcpy(hc.data(), d_costs_b,Nb*sizeof(double),cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(hUi.data(),d_Ubi,(size_t)Nb*dim_u*Tb*sizeof(double),cudaMemcpyDeviceToHost));
+    costs=Eigen::Map<Eigen::VectorXd>(hc.data(),Nb);
+    Ui_cpu=flat_Ui_to_eigen(hUi,Nb,dim_u,Tb);
+}
+
 // ── DBSCAN (CPU) ──────────────────────────────────────────────────
 void BiMPPI_GPU::dbscan(std::vector<std::vector<int>>& clusters,
                          const Eigen::MatrixXd& Di,

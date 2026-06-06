@@ -18,8 +18,8 @@ include_directories(
 
 # ── Macros ────────────────────────────────────────────────────────
 macro(add_cpu_target SRC)
-    get_filename_component(NAME ${SRC} NAME_WE)
-    add_executable(${NAME} ${SRC})
+    get_filename_component(NAME "${SRC}" NAME_WE)
+    add_executable(${NAME} "${SRC}")
     target_compile_options(${NAME} PRIVATE -O3)
     target_link_libraries(${NAME} ${PYTHON_LIBRARIES} OpenMP::OpenMP_CXX)
 endmacro()
@@ -32,6 +32,15 @@ endmacro()
 add_cpu_target(src/wmrobot/log_mppi.cpp)
 add_cpu_target(src/wmrobot/svgd_mppi.cpp)
 add_cpu_target(src/wmrobot/rrt_connect.cpp)
+
+# ---- WMRobot Ablation Study (CPU) ----
+add_cpu_target("src/wmrobot/Ablation study/wmrobot_ablation_mppi.cpp")
+add_cpu_target("src/wmrobot/Ablation study/wmrobot_ablation_cluster_mppi.cpp")
+add_cpu_target("src/wmrobot/Ablation study/wmrobot_ablation_bic_without_guide.cpp")
+add_cpu_target("src/wmrobot/Ablation study/wmrobot_ablation_bic_without_backward.cpp")
+add_cpu_target("src/wmrobot/Ablation study/wmrobot_ablation_bic_without_clustering.cpp")
+add_cpu_target("src/wmrobot/Ablation study/wmrobot_ablation_full_bic_mppi.cpp")
+add_cpu_target("src/wmrobot/Ablation study/wmrobot_ablation_all.cpp")
 
 # ---- Clustering Parameter (CPU) ----
 # add_cpu_target("src/wmrobot/clustering parameter/bi_mppi.cpp")

@@ -30,9 +30,13 @@ case "$TARGET_GROUP" in
         PREFIX="${TARGET_GROUP}_"
         EXAMPLES=("mppi" "log_mppi" "cluster_mppi" "bi_mppi" "svgd_mppi")
         ;;
+    wmrobot_ablation)
+        PREFIX="wmrobot_ablation_gpu_"
+        EXAMPLES=("mppi" "cluster_mppi" "bic_without_guide" "bic_without_backward" "bic_without_clustering" "full_bic_mppi" "all")
+        ;;
     *)
         echo "unknown target group: $TARGET_GROUP"
-        echo "Usage: bash run_gpu_all.sh [manipulator|quadrotor|wmrobot|velo]"
+        echo "Usage: bash run_gpu_all.sh [manipulator|quadrotor|wmrobot|wmrobot_ablation|velo]"
         exit 1
         ;;
 esac

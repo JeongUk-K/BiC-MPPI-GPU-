@@ -8,6 +8,7 @@
 
 #include <Eigen/Dense>
 #include <chrono>
+#include <cstdint>
 #include <ctime>
 #include <deque>
 #include <map>
@@ -28,6 +29,7 @@ public:
 
   void init(BiMPPIParam param);
   void setCollisionChecker(CollisionChecker *cc);
+  void setSeed(std::uint_fast64_t seed);
   void solve();
   void move();
   void setVisLogger(MPPIVisLogger *logger) { vis_logger = logger; }
@@ -107,6 +109,8 @@ protected:
 
   void backwardRollout();
   void forwardRollout();
+  void backwardRawRollout(Eigen::VectorXd &costs, Eigen::MatrixXd &Ui_cpu);
+  void forwardRawRollout(Eigen::VectorXd &costs, Eigen::MatrixXd &Ui_cpu);
   void selectConnection();
   void concatenate();
   void guideMPPI();
@@ -144,4 +148,9 @@ template <typename ModelClass> BiMPPI_GPU::BiMPPI_GPU(ModelClass model) {
   CURAND_CHECK(curandCreateGenerator(&curand_gen, CURAND_RNG_PSEUDO_DEFAULT));
   CURAND_CHECK(curandSetPseudoRandomGeneratorSeed(
       curand_gen, static_cast<unsigned long long>(std::time(nullptr))));
+}
+
+inline void BiMPPI_GPU::setSeed(std::uint_fast64_t seed) {
+  CURAND_CHECK(curandSetPseudoRandomGeneratorSeed(
+      curand_gen, static_cast<unsigned long long>(seed)));
 }

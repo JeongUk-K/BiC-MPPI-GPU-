@@ -8,6 +8,7 @@
 
 #include <Eigen/Dense>
 #include <chrono>
+#include <cstdint>
 #include <ctime>
 #include <iostream>
 #include <typeinfo>
@@ -27,6 +28,7 @@ public:
 
   void init(MPPIParam param);
   void setCollisionChecker(CollisionChecker *cc);
+  void setSeed(std::uint_fast64_t seed);
   virtual void solve();
   void move();
   void setVisLogger(MPPIVisLogger *logger) { vis_logger = logger; }
@@ -121,4 +123,9 @@ MPPI_GPU::MPPI_GPU(ModelClass model) {
   CURAND_CHECK(curandCreateGenerator(&curand_gen, CURAND_RNG_PSEUDO_DEFAULT));
   CURAND_CHECK(curandSetPseudoRandomGeneratorSeed(
       curand_gen, static_cast<unsigned long long>(std::time(nullptr))));
+}
+
+inline void MPPI_GPU::setSeed(std::uint_fast64_t seed) {
+  CURAND_CHECK(curandSetPseudoRandomGeneratorSeed(
+      curand_gen, static_cast<unsigned long long>(seed)));
 }
