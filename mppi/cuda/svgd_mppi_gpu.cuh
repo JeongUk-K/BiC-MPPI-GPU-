@@ -33,6 +33,7 @@ public:
   void setCollisionChecker(CollisionChecker *cc);
   void solve();
   void move();
+  double connectionDistance() const;
   void setVisLogger(MPPIVisLogger *logger) { vis_logger = logger; }
 
   // ── 공개 상태 (CPU BiMPPI와 동일 인터페이스) ──

@@ -32,6 +32,7 @@ public:
   void setSeed(std::uint_fast64_t seed);
   void solve();
   void move();
+  double connectionDistance() const;
   void setVisLogger(MPPIVisLogger *logger) { vis_logger = logger; }
 
   // ---- Public state (mirrors CPU BiMPPI) ----

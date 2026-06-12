@@ -2,6 +2,7 @@
 #include "mppi_gpu.cuh"   // rollout_kernel 접근을 위해 포함
 #include <algorithm>
 #include <cassert>
+#include <cmath>
 #include <cstring>
 #include <limits>
 
@@ -351,20 +352,49 @@ void BiMPPI_GPU::dbscan(std::vector<std::vector<int>>& clusters,
                          const Eigen::MatrixXd& Di,
                          const Eigen::VectorXd& costs, int Ns) {
     clusters.clear();
-    std::map<int,std::vector<int>> tree;
-    std::vector<bool> core(Ns,false);
-#pragma omp parallel for
+    std::vector<std::vector<int>> upper_neighbors(Ns);
+    std::vector<char> valid(Ns, false);
+    for(int i=0;i<Ns;++i) valid[i]=(costs(i)<=1e7);
+
+    const bool use_squared_distance=(deviation_mu>0.0 && epsilon>0.0);
+    const double eps_scaled=use_squared_distance ? epsilon/deviation_mu : 0.0;
+    const double eps_scaled_sq=eps_scaled*eps_scaled;
+#pragma omp parallel for schedule(dynamic,16)
     for(int i=0;i<Ns;++i){
-        if(costs(i)>1e7) continue;
+        if(!valid[i]) continue;
+        std::vector<int>& neighbors=upper_neighbors[i];
         for(int j=i+1;j<Ns;++j){
-            if(costs(j)>1e7) continue;
-            if(deviation_mu*(Di.col(i)-Di.col(j)).norm()<epsilon)
-#pragma omp critical
-            { tree[i].push_back(j); tree[j].push_back(i); }
+            if(!valid[j]) continue;
+            double dist_sq=0.0;
+            for(int d=0;d<Di.rows();++d){
+                const double diff=Di(d,i)-Di(d,j);
+                dist_sq+=diff*diff;
+            }
+            const bool is_neighbor=use_squared_distance
+                ? (dist_sq<eps_scaled_sq)
+                : (deviation_mu*std::sqrt(dist_sq)<epsilon);
+            if(is_neighbor) neighbors.push_back(j);
         }
     }
+
+    std::vector<size_t> degrees(Ns,0);
+    for(int i=0;i<Ns;++i){
+        degrees[i]+=upper_neighbors[i].size();
+        for(int j:upper_neighbors[i]) ++degrees[j];
+    }
+
+    std::vector<std::vector<int>> tree(Ns);
+    for(int i=0;i<Ns;++i) tree[i].reserve(degrees[i]);
+    for(int i=0;i<Ns;++i){
+        for(int j:upper_neighbors[i]){
+            tree[i].push_back(j);
+            tree[j].push_back(i);
+        }
+    }
+
+    std::vector<char> core(Ns,false);
     for(int i=0;i<Ns;++i) if((int)tree[i].size()>minpts) core[i]=true;
-    std::vector<bool> vis(Ns,false);
+    std::vector<char> vis(Ns,false);
     for(int i=0;i<Ns;++i){
         if(!core[i]||vis[i]) continue;
         std::deque<int> q; std::vector<int> cl;
@@ -495,13 +525,35 @@ void BiMPPI_GPU::selectConnection() {
     }
 }
 
+double BiMPPI_GPU::connectionDistance() const {
+    double total = 0.0;
+    int count = 0;
+    for (const auto& joint : joints) {
+        if (joint.size() < 4) continue;
+        int cf = joint[0], cb = joint[1], df = joint[2], db = joint[3];
+        if (cf < 0 || cb < 0 || df < 0 || db < 0 ||
+            cf >= (int)clusters_f.size() || cb >= (int)clusters_b.size() ||
+            df > Tf || db > Tb) {
+            continue;
+        }
+        total += (Xf.block(cf * dim_x, df, dim_x, 1) -
+                  Xb.block(cb * dim_x, db, dim_x, 1))
+                     .norm();
+        ++count;
+    }
+    if (count == 0) {
+        return std::numeric_limits<double>::quiet_NaN();
+    }
+    return total / count;
+}
+
 // ── concatenate ───────────────────────────────────────────────────
 void BiMPPI_GPU::concatenate() {
     Uc.clear(); Xc.clear();
     for(auto& j:joints){
         int cf=j[0],cb=j[1],df=j[2],db=j[3],len=std::max(Tf,df+(Tb-db));
-        Eigen::MatrixXd U(dim_u,len);
-        Eigen::MatrixXd X(dim_x,len+1);
+        Eigen::MatrixXd U=Eigen::MatrixXd::Zero(dim_u,len);
+        Eigen::MatrixXd X=Eigen::MatrixXd::Zero(dim_x,len+1);
         if(df==0) {
             X.leftCols(df+1)=Xf.block(cf*dim_x,0,dim_x,df+1);
         } else {
@@ -509,8 +561,8 @@ void BiMPPI_GPU::concatenate() {
             X.leftCols(df+1)=Xf.block(cf*dim_x,0,dim_x,df+1);
         }
         if(db!=Tb){
-            U.middleCols(df+1,Tb-db-1)=Ub.block(cb*dim_u,db+1,dim_u,Tb-db-1);
-            X.middleCols(df+2,Tb-db-1)=Xb.block(cb*dim_x,db+1,dim_x,Tb-db-1);
+            U.middleCols(df,Tb-db)=Ub.block(cb*dim_u,db,dim_u,Tb-db);
+            X.middleCols(df+1,Tb-db)=Xb.block(cb*dim_x,db+1,dim_x,Tb-db);
         }
         if(df+(Tb-db)<Tf){ U.rightCols(Tf-(df+(Tb-db))).colwise()=dummy_u;
                            X.rightCols(Tf-(df+(Tb-db))).colwise()=x_target; }
@@ -561,6 +613,29 @@ void BiMPPI_GPU::guideMPPI() {
     }
     double mn=std::numeric_limits<double>::max(); int idx=0;
     for(int r=0;r<(int)joints.size();++r) if(Cr[r]<mn){mn=Cr[r];idx=r;}
+    if(mn>=1e7){
+        double best_ref_cost=std::numeric_limits<double>::max();
+        int best_ref_idx=-1;
+        for(int r=0;r<(int)Xc.size();++r){
+            bool feasible=true;
+            double ref_cost=0.0;
+            for(int t=0;t<Xc[r].cols();++t){
+                if(collision_checker->getCollisionGrid(Xc[r].col(t))){
+                    feasible=false;
+                    break;
+                }
+                ref_cost+=p(Xc[r].col(t), x_target);
+            }
+            if(feasible && ref_cost<best_ref_cost){
+                best_ref_cost=ref_cost;
+                best_ref_idx=r;
+            }
+        }
+        if(best_ref_idx>=0){
+            Uo=Uc[best_ref_idx]; Xo=Xc[best_ref_idx]; u0=Uo.col(0);
+            return;
+        }
+    }
     Uo=Ur[idx]; Xo=Xr[idx]; u0=Uo.col(0);
 }
 

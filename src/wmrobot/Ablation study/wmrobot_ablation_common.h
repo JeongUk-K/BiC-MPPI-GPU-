@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 #include <deque>
 #include <fstream>
@@ -84,6 +85,27 @@ struct AblationSummary {
   double tbar_elapsed = 0.0;
   double dbar_goal = 0.0;
   double dbar_conn = std::numeric_limits<double>::quiet_NaN();
+  double avg_iter_success = std::numeric_limits<double>::quiet_NaN();
+  double avg_total_elapsed_success = std::numeric_limits<double>::quiet_NaN();
+  double avg_rollout_time_success = std::numeric_limits<double>::quiet_NaN();
+  double avg_clustering_time_success = std::numeric_limits<double>::quiet_NaN();
+  double avg_connection_time_success = std::numeric_limits<double>::quiet_NaN();
+  double avg_guide_time_success = std::numeric_limits<double>::quiet_NaN();
+  double total_elapsed_success_q1 = std::numeric_limits<double>::quiet_NaN();
+  double total_elapsed_success_q2 = std::numeric_limits<double>::quiet_NaN();
+  double total_elapsed_success_q3 = std::numeric_limits<double>::quiet_NaN();
+  double rollout_time_success_q1 = std::numeric_limits<double>::quiet_NaN();
+  double rollout_time_success_q2 = std::numeric_limits<double>::quiet_NaN();
+  double rollout_time_success_q3 = std::numeric_limits<double>::quiet_NaN();
+  double clustering_time_success_q1 = std::numeric_limits<double>::quiet_NaN();
+  double clustering_time_success_q2 = std::numeric_limits<double>::quiet_NaN();
+  double clustering_time_success_q3 = std::numeric_limits<double>::quiet_NaN();
+  double connection_time_success_q1 = std::numeric_limits<double>::quiet_NaN();
+  double connection_time_success_q2 = std::numeric_limits<double>::quiet_NaN();
+  double connection_time_success_q3 = std::numeric_limits<double>::quiet_NaN();
+  double guide_time_success_q1 = std::numeric_limits<double>::quiet_NaN();
+  double guide_time_success_q2 = std::numeric_limits<double>::quiet_NaN();
+  double guide_time_success_q3 = std::numeric_limits<double>::quiet_NaN();
 };
 
 inline bool isFiniteMetric(double value) { return std::isfinite(value); }
@@ -95,6 +117,21 @@ inline std::string csvDouble(double value) {
   std::ostringstream out;
   out << std::setprecision(10) << value;
   return out.str();
+}
+
+inline double quantile(std::vector<double> values, double q) {
+  if (values.empty()) {
+    return std::numeric_limits<double>::quiet_NaN();
+  }
+  std::sort(values.begin(), values.end());
+  if (values.size() == 1) {
+    return values.front();
+  }
+  const double pos = q * static_cast<double>(values.size() - 1);
+  const auto lo = static_cast<std::size_t>(std::floor(pos));
+  const auto hi = static_cast<std::size_t>(std::ceil(pos));
+  const double alpha = pos - static_cast<double>(lo);
+  return values[lo] * (1.0 - alpha) + values[hi] * alpha;
 }
 
 inline std::string variantFileToken(AblationVariant variant) {
@@ -806,7 +843,19 @@ inline void writeRunRow(std::ofstream &csv, const AblationRunResult &row) {
 
 inline void writeSummaryHeader(std::ofstream &csv) {
   csv << "Variant,Success Rate,Nfail,Nbar_iter,Tbar_elapsed,dbar_goal,dbar_conn,"
-         "num_runs,num_success\n";
+         "num_runs,num_success,"
+         "variant,num_sim,num_success,num_failure,success_rate,"
+         "avg_iter_success,avg_total_elapsed_success,"
+         "avg_rollout_time_success,avg_clustering_time_success,"
+         "avg_connection_time_success,avg_guide_time_success,"
+         "total_elapsed_success_q1,total_elapsed_success_q2,"
+         "total_elapsed_success_q3,rollout_time_success_q1,"
+         "rollout_time_success_q2,rollout_time_success_q3,"
+         "clustering_time_success_q1,clustering_time_success_q2,"
+         "clustering_time_success_q3,connection_time_success_q1,"
+         "connection_time_success_q2,connection_time_success_q3,"
+         "guide_time_success_q1,guide_time_success_q2,"
+         "guide_time_success_q3\n";
 }
 
 inline void writeSummaryRow(std::ofstream &csv, const AblationSummary &summary) {
@@ -814,7 +863,30 @@ inline void writeSummaryRow(std::ofstream &csv, const AblationSummary &summary) 
       << summary.nfail << ',' << csvDouble(summary.nbar_iter) << ','
       << csvDouble(summary.tbar_elapsed) << ',' << csvDouble(summary.dbar_goal)
       << ',' << csvDouble(summary.dbar_conn) << ',' << summary.num_runs << ','
-      << summary.num_success << '\n';
+      << summary.num_success << ',' << summary.variant << ',' << summary.num_runs
+      << ',' << summary.num_success << ',' << summary.nfail << ','
+      << csvDouble(summary.success_rate) << ','
+      << csvDouble(summary.avg_iter_success) << ','
+      << csvDouble(summary.avg_total_elapsed_success) << ','
+      << csvDouble(summary.avg_rollout_time_success) << ','
+      << csvDouble(summary.avg_clustering_time_success) << ','
+      << csvDouble(summary.avg_connection_time_success) << ','
+      << csvDouble(summary.avg_guide_time_success) << ','
+      << csvDouble(summary.total_elapsed_success_q1) << ','
+      << csvDouble(summary.total_elapsed_success_q2) << ','
+      << csvDouble(summary.total_elapsed_success_q3) << ','
+      << csvDouble(summary.rollout_time_success_q1) << ','
+      << csvDouble(summary.rollout_time_success_q2) << ','
+      << csvDouble(summary.rollout_time_success_q3) << ','
+      << csvDouble(summary.clustering_time_success_q1) << ','
+      << csvDouble(summary.clustering_time_success_q2) << ','
+      << csvDouble(summary.clustering_time_success_q3) << ','
+      << csvDouble(summary.connection_time_success_q1) << ','
+      << csvDouble(summary.connection_time_success_q2) << ','
+      << csvDouble(summary.connection_time_success_q3) << ','
+      << csvDouble(summary.guide_time_success_q1) << ','
+      << csvDouble(summary.guide_time_success_q2) << ','
+      << csvDouble(summary.guide_time_success_q3) << '\n';
 }
 
 inline AblationSummary summarizeRuns(const std::string &variant,
@@ -831,6 +903,17 @@ inline AblationSummary summarizeRuns(const std::string &variant,
   double goal_sum = 0.0;
   double conn_sum = 0.0;
   int conn_count = 0;
+  double success_iter_sum = 0.0;
+  double success_elapsed_sum = 0.0;
+  double success_rollout_sum = 0.0;
+  double success_clustering_sum = 0.0;
+  double success_connection_sum = 0.0;
+  double success_guide_sum = 0.0;
+  std::vector<double> success_elapsed_values;
+  std::vector<double> success_rollout_values;
+  std::vector<double> success_clustering_values;
+  std::vector<double> success_connection_values;
+  std::vector<double> success_guide_values;
   for (const auto &run : runs) {
     summary.num_success += run.is_success ? 1 : 0;
     iter_sum += run.iter;
@@ -839,6 +922,19 @@ inline AblationSummary summarizeRuns(const std::string &variant,
     if (isFiniteMetric(run.d_conn)) {
       conn_sum += run.d_conn;
       ++conn_count;
+    }
+    if (run.is_success) {
+      success_iter_sum += run.iter;
+      success_elapsed_sum += run.elapsed;
+      success_rollout_sum += run.elapsed_rollout;
+      success_clustering_sum += run.elapsed_clustering;
+      success_connection_sum += run.elapsed_connection;
+      success_guide_sum += run.elapsed_guide;
+      success_elapsed_values.push_back(run.elapsed);
+      success_rollout_values.push_back(run.elapsed_rollout);
+      success_clustering_values.push_back(run.elapsed_clustering);
+      success_connection_values.push_back(run.elapsed_connection);
+      success_guide_values.push_back(run.elapsed_guide);
     }
   }
   summary.nfail = summary.num_runs - summary.num_success;
@@ -849,6 +945,36 @@ inline AblationSummary summarizeRuns(const std::string &variant,
   summary.dbar_goal = goal_sum / summary.num_runs;
   if (conn_count > 0) {
     summary.dbar_conn = conn_sum / conn_count;
+  }
+  if (summary.num_success > 0) {
+    const double denom = static_cast<double>(summary.num_success);
+    summary.avg_iter_success = success_iter_sum / denom;
+    summary.avg_total_elapsed_success = success_elapsed_sum / denom;
+    summary.avg_rollout_time_success = success_rollout_sum / denom;
+    summary.avg_clustering_time_success = success_clustering_sum / denom;
+    summary.avg_connection_time_success = success_connection_sum / denom;
+    summary.avg_guide_time_success = success_guide_sum / denom;
+    summary.total_elapsed_success_q1 = quantile(success_elapsed_values, 0.25);
+    summary.total_elapsed_success_q2 = quantile(success_elapsed_values, 0.50);
+    summary.total_elapsed_success_q3 = quantile(success_elapsed_values, 0.75);
+    summary.rollout_time_success_q1 = quantile(success_rollout_values, 0.25);
+    summary.rollout_time_success_q2 = quantile(success_rollout_values, 0.50);
+    summary.rollout_time_success_q3 = quantile(success_rollout_values, 0.75);
+    summary.clustering_time_success_q1 =
+        quantile(success_clustering_values, 0.25);
+    summary.clustering_time_success_q2 =
+        quantile(success_clustering_values, 0.50);
+    summary.clustering_time_success_q3 =
+        quantile(success_clustering_values, 0.75);
+    summary.connection_time_success_q1 =
+        quantile(success_connection_values, 0.25);
+    summary.connection_time_success_q2 =
+        quantile(success_connection_values, 0.50);
+    summary.connection_time_success_q3 =
+        quantile(success_connection_values, 0.75);
+    summary.guide_time_success_q1 = quantile(success_guide_values, 0.25);
+    summary.guide_time_success_q2 = quantile(success_guide_values, 0.50);
+    summary.guide_time_success_q3 = quantile(success_guide_values, 0.75);
   }
   return summary;
 }

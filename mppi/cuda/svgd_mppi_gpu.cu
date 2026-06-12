@@ -987,6 +987,29 @@ void SVGDMPPI_GPU::selectConnection() {
   }
 }
 
+double SVGDMPPI_GPU::connectionDistance() const {
+  double total = 0.0;
+  int count = 0;
+  for (const auto &joint : joints) {
+    if (joint.size() < 4)
+      continue;
+    int cf = joint[0], cb = joint[1], df = joint[2], db = joint[3];
+    if (cf < 0 || cb < 0 || df < 0 || db < 0 ||
+        cf >= (int)clusters_f.size() || cb >= (int)clusters_b.size() ||
+        df > Tf || db > Tb) {
+      continue;
+    }
+    total += (Xf.block(cf * dim_x, df, dim_x, 1) -
+              Xb.block(cb * dim_x, db, dim_x, 1))
+                 .norm();
+    ++count;
+  }
+  if (count == 0) {
+    return std::numeric_limits<double>::quiet_NaN();
+  }
+  return total / count;
+}
+
 void SVGDMPPI_GPU::concatenate() {
   Uc.clear();
   Xc.clear();

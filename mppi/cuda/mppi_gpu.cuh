@@ -24,7 +24,7 @@
 class MPPI_GPU {
 public:
   template <typename ModelClass> MPPI_GPU(ModelClass model);
-  ~MPPI_GPU();
+  virtual ~MPPI_GPU();
 
   void init(MPPIParam param);
   void setCollisionChecker(CollisionChecker *cc);
@@ -95,7 +95,7 @@ protected:
   void uploadCollisionData();
   void uploadControl();          // U_0 → d_U0
   void uploadState();            // x_init, x_target → device
-  void generateNoise();          // fill d_noise with N(0,1)
+  virtual void generateNoise();  // fill d_noise with N(0,1)
   void launchRollout();          // kernel: rollout + cost per sample
   void weightedControlSum(Eigen::MatrixXd &Uo_out); // reduction → Uo
 };

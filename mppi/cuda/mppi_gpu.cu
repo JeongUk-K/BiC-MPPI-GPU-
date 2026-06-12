@@ -83,13 +83,16 @@ void MPPI_GPU::setCollisionChecker(CollisionChecker *cc) {
 // ---- Memory management ----
 void MPPI_GPU::allocGPU() {
   size_t sz_U  = (size_t)dim_u * T * sizeof(double);
-  size_t sz_Ui = (size_t)N * dim_u * T * sizeof(double);
+  size_t noise_count = (size_t)N * dim_u * T;
+  size_t noise_count_even = (noise_count % 2 != 0) ? noise_count + 1 : noise_count;
+  size_t sz_Ui = noise_count * sizeof(double);
+  size_t sz_noise = noise_count_even * sizeof(double);
   size_t sz_N  = (size_t)N * sizeof(double);
   size_t sz_Di = (size_t)N * dim_u * sizeof(double);
 
   CUDA_CHECK(cudaMalloc(&d_U0,       sz_U));
   CUDA_CHECK(cudaMalloc(&d_Ui,       sz_Ui));
-  CUDA_CHECK(cudaMalloc(&d_noise,    sz_Ui));
+  CUDA_CHECK(cudaMalloc(&d_noise,    sz_noise));
   CUDA_CHECK(cudaMalloc(&d_costs,    sz_N));
   CUDA_CHECK(cudaMalloc(&d_Uo,       sz_U));
   CUDA_CHECK(cudaMalloc(&d_Di,       sz_Di));

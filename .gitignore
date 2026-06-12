@@ -4,3 +4,5 @@ eigen/
 matplotlibcpp/
 EigenRand/
 BARN_dataset/txt_files
+results/
+result/

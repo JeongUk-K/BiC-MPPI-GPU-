@@ -1,6 +1,8 @@
 #include <cluster_mppi_gpu.cuh>
 #include <wmrobot_map.h>
 
+#include "wmrobot_gpu_stats.h"
+
 #include <Eigen/Dense>
 #include <chrono>
 #include <fstream>
@@ -22,14 +24,16 @@ int main() {
   param.N = 10000;
   param.gamma_u = 10.0;
   Eigen::VectorXd sigma_u(model.dim_u);
-  sigma_u << 1.5, 1.5;
+  sigma_u << 0.6, 0.6;
   param.sigma_u = sigma_u.asDiagonal();
 
   int maxiter = 200;
 
+  const std::string variant = "Cluster-MPPI";
+  std::vector<WmrobotGpuRunResult> runs;
+
   std::ofstream csv("result_cluster_mppi.csv");
-  csv << "s,map,is_success,iter,elapsed,elapsed_rollout,elapsed_clustering,"
-         "elapsed_connection,elapsed_guide,f_err\n";
+  writeWmrobotGpuRunHeader(csv);
   // for (int map = 299; map >= 0 ; --map) {
   // for (int map = 276; map >= 0; --map) {
   // for (int s = 1; s < 2; ++s) {
@@ -58,51 +62,51 @@ int main() {
       solver.init(param);
       solver.setCollisionChecker(&collision_checker);
 
-      bool is_success = false;
-      bool is_collision = false;
-      int i = 0;
-      double total_elapsed = 0.0;
-      double total_rollout = 0.0;
-      double total_clustering = 0.0;
-      double total_connection = 0.0;
-      double total_guide = 0.0;
-      double f_err = 0.0;
-      for (i = 0; i < maxiter; ++i) {
+      WmrobotGpuRunResult row;
+      row.variant = variant;
+      row.start_case = s;
+      row.map_id = map;
+
+      for (row.iter = 0; row.iter < maxiter; ++row.iter) {
 
         solver.solve();
         solver.move();
 
-        total_elapsed += solver.elapsed;
-        total_rollout += solver.elapsed_rollout;
-        total_clustering += solver.elapsed_clustering;
-        total_connection += solver.elapsed_connection;
-        total_guide += solver.elapsed_guide;
+        row.elapsed += solver.elapsed;
+        row.elapsed_rollout += solver.elapsed_rollout;
+        row.elapsed_clustering += solver.elapsed_clustering;
+        row.elapsed_connection += solver.elapsed_connection;
+        row.elapsed_guide += solver.elapsed_guide;
 
         // std::cout<<"1 solved in "<<solver.elapsed_1.count()<<std::endl;
 
         if (collision_checker.getCollisionGrid(solver.x_init)) {
-          is_collision = true;
+          row.is_collision = true;
           break;
         } else {
-          f_err = (solver.x_init - param.x_target).norm();
-          // std::cout<<"f_err = "<<f_err<<std::endl;
-          if (f_err < 0.1) {
-            is_success = true;
+          row.d_goal = (solver.x_init - param.x_target).norm();
+          if (row.d_goal < 0.1) {
+            row.is_success = true;
             break;
           }
         }
         // solver.show();
       }
-      std::cout << s << '\t' << map << '\t' << is_success << '\t' << i << '\t'
-                << total_elapsed << std::endl;
-      csv << s << ',' << map << ',' << is_success << ',' << i << ','
-          << total_elapsed << ',' << total_rollout << ',' << total_clustering
-          << ',' << total_connection << ',' << total_guide << ',' << f_err
-          << '\n';
+      if (row.iter >= maxiter) {
+        row.iter = maxiter;
+      }
+      printWmrobotGpuRunRow(std::cout, row);
+      writeWmrobotGpuRunRow(csv, row);
+      runs.push_back(row);
       // solver.showTraj();
     }
   }
 
   csv.close();
+
+  const auto summary = summarizeWmrobotGpuRuns(variant, runs);
+  std::ofstream summary_csv("result_cluster_mppi_summary.csv");
+  writeWmrobotGpuSummaryHeader(summary_csv);
+  writeWmrobotGpuSummaryRow(summary_csv, summary);
   return 0;
 }
