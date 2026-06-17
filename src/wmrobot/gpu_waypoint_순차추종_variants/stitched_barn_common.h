@@ -641,6 +641,12 @@ public:
     elapsed_clustering = 0.0;
     elapsed_connection = 0.0;
     elapsed_guide = 0.0;
+    vis_rollout_samples.clear();
+    const int previous_vis_samples_per_call = vis_rollout_samples_per_call;
+    const int segment_count = static_cast<int>(anchors.size()) - 1;
+    const int rollout_call_count = std::max(1, 2 * segment_count);
+    vis_rollout_samples_per_call =
+        std::max(1, kMaxSavedBiRollouts / rollout_call_count);
     start = std::chrono::high_resolution_clock::now();
 
     const Eigen::VectorXd global_start = anchors.front();
@@ -698,6 +704,9 @@ public:
               elapsed_guide;
 
     if (vis_logger && vis_logger->enabled) {
+      if (!vis_rollout_samples.empty()) {
+        vis_logger->saveTrajectories("rollouts", vis_rollout_samples);
+      }
       if (!forward_cluster_paths.empty()) {
         vis_logger->saveTrajectories("forward_clusters",
                                      forward_cluster_paths);
@@ -714,6 +723,7 @@ public:
     }
 
     visual_traj.push_back(x_init);
+    vis_rollout_samples_per_call = previous_vis_samples_per_call;
   }
 
 private:

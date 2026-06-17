@@ -14,7 +14,7 @@ OUT_DIR="results/wmrobot_waypoint_stitched_sequential_variants"
 ROLLOUT_SCENARIO="0"
 ROLLOUT_STEP="first"
 MAX_ROLLOUTS="24"
-GIF_FPS="4"
+GIF_FPS="20"
 EXTRA_ARGS=()
 
 while [[ $# -gt 0 ]]; do
@@ -84,10 +84,10 @@ Common options:
   --no-build               Skip compilation and use existing build/gpu/wmrobot_waypoint_seq_var_* binaries.
   --no-viz                 Skip PNG/GIF visualization generation.
   --out DIR                Output directory. Default: results/wmrobot_waypoint_stitched_sequential_variants
-  --rollout-scenario N     Scenario used for static rollout PNG. Default: 0
+  --rollout-scenario N     Kept for compatibility; rollout PNG/GIF outputs cover all scenarios.
   --rollout-step STEP      first, middle, last, or step_0000. Default: first
   --max-rollouts N         Max sampled rollout trajectories per group. Default: 24
-  --gif-fps N              GIF frames per second. Default: 4
+  --gif-fps N              GIF frames per second. Default: 20
 
 Forwarded solver options:
   Default parameters live in src/wmrobot/gpu_waypoint_순차추종_variants/stitched_barn_common.h
@@ -100,6 +100,7 @@ Forwarded solver options:
   --bic-Tf N --bic-Tb N    BiC forward/backward rollout horizon. Default: 50/50
   --N N --Nf N --Nb N --Nr N --maxiter N
   --vis-every N            Save rollout data every N closed-loop iterations.
+                           Default is 1 for this sequential visualization.
   --no-rollouts            Save CSV paths only.
 USAGE
             exit 0
@@ -337,8 +338,8 @@ echo "  $OUT_DIR/{mppi,log_mppi,cluster_mppi,bi_mppi}/timings.csv"
 if [[ "$VISUALIZE" -eq 1 ]]; then
     echo "  $OUT_DIR/wmrobot_stitched_aggregate.csv"
     echo "  $OUT_DIR/wmrobot_stitched_timing.png"
-    echo "  $OUT_DIR/wmrobot_stitched_paths_scenario_00.png"
-    echo "  $OUT_DIR/wmrobot_stitched_rollouts_scenario_$(printf '%02d' "$ROLLOUT_SCENARIO").png"
+    echo "  $OUT_DIR/wmrobot_stitched_paths_scenario_XX.png"
+    echo "  $OUT_DIR/wmrobot_stitched_rollouts_scenario_XX.png"
     echo "  $OUT_DIR/rollout_gifs/wmrobot_stitched_{mppi,log_mppi,cluster_mppi,bi_mppi}_scenario_XX.gif"
 else
     echo "  visualization skipped (--no-viz)"
