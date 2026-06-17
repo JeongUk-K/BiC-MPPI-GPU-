@@ -18,7 +18,6 @@ SOLVERS = [
     ("log_mppi", "Log-MPPI", "result_log_mppi.csv", "#b279a2"),
     ("cluster_mppi", "Cluster-MPPI", "result_cluster_mppi.csv", "#54a24b"),
     ("bi_mppi", "BiC-MPPI", "result_bi_mppi.csv", "#e45756"),
-    ("svgd_mppi", "SVGD-MPPI", "result_svgd_mppi.csv", "#f58518"),
 ]
 
 
@@ -205,7 +204,80 @@ def plot_paths(dataset, grid, meta, out_path):
     plt.close(fig)
 
 
-def plot_paths_gif(dataset, grid, meta, out_path, max_frames, duration_ms):
+def logged_step_numbers(item):
+    steps = []
+    for step_dir in item["dir"].glob("step_*"):
+        if not step_dir.is_dir():
+            continue
+        try:
+            steps.append(int(step_dir.name.split("_", 1)[1]))
+        except (IndexError, ValueError):
+            continue
+    return sorted(steps)
+
+
+def logged_step_name_at_or_before(item, step_idx):
+    steps = logged_step_numbers(item)
+    if not steps:
+        return ""
+    candidate = steps[0]
+    for step in steps:
+        if step > step_idx:
+            break
+        candidate = step
+    return f"step_{candidate:04d}"
+
+
+def gif_rollout_groups(item, step_name, max_rollouts):
+    step_dir = item["dir"] / step_name
+    specs = [
+        ("rollouts", "rollouts", "#7f878f", "-", 0.26, 0.55, 3),
+        ("clusters", "clusters", "#f58518", "-", 0.78, 1.05, 5),
+        ("forward_clusters", "forward clusters", "#f58518", "-", 0.78, 1.05, 5),
+        ("backward_clusters", "backward clusters", "#e45756", "--", 0.70, 1.05, 5),
+    ]
+    groups = []
+    for file_label, display, color, linestyle, alpha, linewidth, zorder in specs:
+        trajectories = stride_limit(read_vis_bin(step_dir / f"{file_label}.bin"), max_rollouts)
+        if trajectories:
+            groups.append((display, trajectories, color, linestyle, alpha, linewidth, zorder))
+    return groups
+
+
+def draw_gif_rollouts(ax, item, step_idx, max_rollouts):
+    step_name = logged_step_name_at_or_before(item, step_idx)
+    if not step_name:
+        return
+    seen = set()
+    for display, trajs, color, linestyle, alpha, linewidth, zorder in gif_rollout_groups(
+        item, step_name, max_rollouts
+    ):
+        label = display if display not in seen else None
+        seen.add(display)
+        for k, traj in enumerate(trajs):
+            ax.plot(
+                traj[0],
+                traj[1],
+                color=color,
+                linestyle=linestyle,
+                linewidth=linewidth,
+                alpha=alpha,
+                label=label if k == 0 else None,
+                zorder=zorder,
+            )
+
+
+def plot_paths_gif(
+    dataset,
+    grid,
+    meta,
+    out_path,
+    max_frames,
+    duration_ms,
+    max_rollouts=24,
+    title_prefix="WMRobot map 285 path evolution",
+    show_rollouts=False,
+):
     from PIL import Image
 
     resolution = float(meta.get("map_resolution", 0.1))
@@ -227,6 +299,8 @@ def plot_paths_gif(dataset, grid, meta, out_path, max_frames, duration_ms):
         fig, ax = plt.subplots(figsize=(5.8, 8.0), dpi=110)
         add_map(ax, grid, resolution)
         for item in dataset:
+            if show_rollouts:
+                draw_gif_rollouts(ax, item, step_idx, max_rollouts)
             path = item["path"]
             if path.shape[1] == 0:
                 continue
@@ -237,21 +311,23 @@ def plot_paths_gif(dataset, grid, meta, out_path, max_frames, duration_ms):
                 path[0, :end],
                 path[1, :end],
                 color=item["color"],
-                linewidth=2.0,
+                linewidth=2.15,
                 label=item["label"],
-                zorder=5,
+                zorder=9,
             )
             ax.scatter(
                 path[0, end - 1],
                 path[1, end - 1],
                 s=22,
                 color=item["color"],
-                zorder=6,
+                edgecolor="#ffffff",
+                linewidth=0.45,
+                zorder=10,
             )
 
         ax.scatter(start[0], start[1], marker="s", s=48, color="#111111", zorder=8)
         ax.scatter(target[0], target[1], marker="*", s=82, color="#111111", zorder=8)
-        ax.set_title(f"WMRobot map 285 path evolution  |  step {step_idx:03d}")
+        ax.set_title(f"{title_prefix}  |  step {step_idx:03d}")
         ax.legend(loc="lower center", bbox_to_anchor=(0.5, -0.17), ncol=2,
                   frameon=False, fontsize=8)
         fig.tight_layout()
@@ -461,6 +537,7 @@ def main():
     )
     gif_path = out_dir / "wmrobot_map_285_paths.gif"
     gif_created = False
+    solver_gif_paths = []
     if not args.no_gif:
         gif_created = plot_paths_gif(
             dataset,
@@ -469,7 +546,24 @@ def main():
             gif_path,
             args.gif_frames,
             args.gif_duration_ms,
+            args.max_rollouts,
         )
+        solver_gif_dir = out_dir / "solver_gifs"
+        solver_gif_dir.mkdir(parents=True, exist_ok=True)
+        for item in dataset:
+            solver_gif_path = solver_gif_dir / f"wmrobot_map_285_{item['solver']}_paths.gif"
+            if plot_paths_gif(
+                [item],
+                grid,
+                meta,
+                solver_gif_path,
+                args.gif_frames,
+                args.gif_duration_ms,
+                args.max_rollouts,
+                f"WMRobot map 285 {item['label']} path evolution",
+                True,
+            ):
+                solver_gif_paths.append(solver_gif_path)
 
     print(out_dir / "wmrobot_map_285_summary.csv")
     print(out_dir / "wmrobot_map_285_paths.png")
@@ -477,6 +571,8 @@ def main():
     print(out_dir / "wmrobot_map_285_rollouts.png")
     if gif_created:
         print(gif_path)
+    for solver_gif_path in solver_gif_paths:
+        print(solver_gif_path)
 
 
 if __name__ == "__main__":

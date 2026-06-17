@@ -17,7 +17,7 @@
 #   bash build_gpu.sh wmrobot_waypoint  # wmrobot waypoint-parallel BiC 예제 빌드
 #   bash build_gpu.sh wmrobot_waypoint_stitched  # wmrobot 5-map stitched waypoint 예제 빌드
 #   bash build_gpu.sh wmrobot_waypoint_stitched_sequential  # wmrobot 5-map stitched 순차추종 예제 빌드
-#   bash build_gpu.sh wmrobot_map_285  # wmrobot map 285 시각화 예제 빌드
+#   bash build_gpu.sh wmrobot_map_285  # wmrobot map 285 4개 시각화 예제 빌드
 #   bash build_gpu.sh velo        # velo GPU 예제 빌드
 # ============================================================
 set -e
@@ -149,7 +149,8 @@ mkdir -p "$GPU_BUILD_DIR"
 
 BUILD_SVGD_OBJ=1
 if [ "$TARGET_GROUP" = "wmrobot_waypoint_stitched" ] || \
-   [ "$TARGET_GROUP" = "wmrobot_waypoint_stitched_sequential" ]; then
+   [ "$TARGET_GROUP" = "wmrobot_waypoint_stitched_sequential" ] || \
+   [ "$TARGET_GROUP" = "wmrobot_map_285" ]; then
     BUILD_SVGD_OBJ=0
 fi
 
@@ -300,12 +301,11 @@ case "$TARGET_GROUP" in
         build_target "src/wmrobot/gpu_waypoint_순차추종/bi_mppi.cpp"
         ;;
     wmrobot_map_285)
-        # ---- WMRobot map 285 시각화 예제 ----
+        # ---- WMRobot map 285 4개 시각화 예제 ----
         build_target_named src/wmrobot/map_285/mppi.cpp vis_mppi
         build_target_named src/wmrobot/map_285/log_mppi.cpp vis_log_mppi
         build_target_named src/wmrobot/map_285/cluster_mppi.cpp vis_cluster_mppi
         build_target_named src/wmrobot/map_285/bi_mppi.cpp vis_bi_mppi
-        build_target_named src/wmrobot/map_285/svgd_mppi.cpp vis_svgd_mppi
         ;;
     velo)
         # ---- Velo GPU 버전 ----
@@ -354,7 +354,7 @@ elif [ "$TARGET_GROUP" = "wmrobot_waypoint_stitched_sequential" ]; then
     echo "      cd build && ./gpu/wmrobot_waypoint_seq_bi_mppi --smoke --overwrite"
 elif [ "$TARGET_GROUP" = "wmrobot_map_285" ]; then
     echo "실행: cd build && ./gpu/vis_mppi && ./gpu/vis_log_mppi"
-    echo "      cd build && ./gpu/vis_cluster_mppi && ./gpu/vis_bi_mppi && ./gpu/vis_svgd_mppi"
+    echo "      cd build && ./gpu/vis_cluster_mppi && ./gpu/vis_bi_mppi"
 else
     echo "실행: cd build && ./gpu/${TARGET_GROUP}_mppi"
     echo "      cd build && ./gpu/${TARGET_GROUP}_bi_mppi"

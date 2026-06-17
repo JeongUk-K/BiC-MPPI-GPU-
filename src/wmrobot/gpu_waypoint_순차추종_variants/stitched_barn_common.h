@@ -31,6 +31,7 @@ namespace wmrobot_stitched {
 
 constexpr double kPi = 3.14159265358979323846;
 constexpr double kHalfPi = 1.57079632679489661923;
+constexpr int kMppiLikeGlobalTLimit = 100;
 
 // --------------------------------------------------------------------------
 // Edit shared map / waypoint / experiment parameters here.
@@ -38,7 +39,7 @@ constexpr double kHalfPi = 1.57079632679489661923;
 // makeClusterMppiConfig(), and makeBiMppiConfig() directly below.
 // --------------------------------------------------------------------------
 struct Config {
-  std::string out_dir = "../results/wmrobot_waypoint_stitched_sequential";
+  std::string out_dir = "../results/wmrobot_waypoint_stitched_sequential_variants";
   std::string dataset_dir = "../BARN_dataset/txt_files";
   bool overwrite = false;
   bool smoke = false;
@@ -47,7 +48,7 @@ struct Config {
   int maps_per_scenario = 5;
   int dataset_maps = 150;
   int maxiter = 1000;
-  int global_T = 100;
+  int global_T = 500;
   int waypoint_count = 6;
   int bic_Tf = 50;
   int bic_Tb = 50;
@@ -72,7 +73,7 @@ inline Config makeMppiConfig() {
   Config cfg = makeCommonExperimentConfig();
 
   // MPPI follows cfg.waypoint_count waypoints sequentially.
-  cfg.global_T = 500;
+  cfg.global_T = kMppiLikeGlobalTLimit;
   cfg.N = 3000;
 
   return cfg;
@@ -82,7 +83,7 @@ inline Config makeLogMppiConfig() {
   Config cfg = makeCommonExperimentConfig();
 
   // Log-MPPI follows cfg.waypoint_count waypoints sequentially.
-  cfg.global_T = 500;
+  cfg.global_T = kMppiLikeGlobalTLimit;
   cfg.N = 3000;
 
   return cfg;
@@ -92,7 +93,7 @@ inline Config makeClusterMppiConfig() {
   Config cfg = makeCommonExperimentConfig();
 
   // Cluster-MPPI follows cfg.waypoint_count waypoints sequentially.
-  cfg.global_T = 500;
+  cfg.global_T = kMppiLikeGlobalTLimit;
   cfg.N = 3000;
 
   return cfg;
@@ -260,6 +261,10 @@ inline Config parseArgs(int argc, char **argv, Config cfg = Config()) {
     throw std::runtime_error("maps-per-scenario cannot exceed dataset-maps");
   }
   return cfg;
+}
+
+inline void limitMppiLikeGlobalT(Config &cfg) {
+  cfg.global_T = std::min(cfg.global_T, kMppiLikeGlobalTLimit);
 }
 
 inline std::string csvDouble(double value) {
@@ -636,12 +641,6 @@ public:
     elapsed_clustering = 0.0;
     elapsed_connection = 0.0;
     elapsed_guide = 0.0;
-    vis_rollout_samples.clear();
-    const int previous_vis_samples_per_call = vis_rollout_samples_per_call;
-    const int segment_count = static_cast<int>(anchors.size()) - 1;
-    const int rollout_call_count = std::max(1, 2 * segment_count);
-    vis_rollout_samples_per_call =
-        std::max(1, kMaxSavedBiRollouts / rollout_call_count);
     start = std::chrono::high_resolution_clock::now();
 
     const Eigen::VectorXd global_start = anchors.front();
@@ -699,9 +698,6 @@ public:
               elapsed_guide;
 
     if (vis_logger && vis_logger->enabled) {
-      if (!vis_rollout_samples.empty()) {
-        vis_logger->saveTrajectories("rollouts", vis_rollout_samples);
-      }
       if (!forward_cluster_paths.empty()) {
         vis_logger->saveTrajectories("forward_clusters",
                                      forward_cluster_paths);
@@ -718,7 +714,6 @@ public:
     }
 
     visual_traj.push_back(x_init);
-    vis_rollout_samples_per_call = previous_vis_samples_per_call;
   }
 
 private:
@@ -1011,7 +1006,8 @@ int runMppiLikeExecutable(int argc, char **argv, const std::string &solver_key,
                           int solver_seed_offset,
                           Config cpp_defaults = Config()) {
   try {
-    const Config cfg = parseArgs(argc, argv, cpp_defaults);
+    Config cfg = parseArgs(argc, argv, cpp_defaults);
+    limitMppiLikeGlobalT(cfg);
     const auto solver_dir = prepareSolverDir(cfg, solver_key);
     writeMetadata(cfg, solver_key, solver_label, solver_dir,
                   "sequential_waypoints",

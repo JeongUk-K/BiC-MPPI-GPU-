@@ -3,16 +3,22 @@
 #include <cmath>
 #include <cstring>
 
+#include "quadrotor_landing_cost.h"
+
 enum LegacyCudaModelType {
   LEGACY_CUDA_WMROBOT = 0,
   LEGACY_CUDA_QUADROTOR = 1,
   LEGACY_CUDA_VELO = 2,
   LEGACY_CUDA_MANIPULATOR = 3,
   LEGACY_CUDA_BICYCLE = 4,
+  LEGACY_CUDA_QUADROTOR_PRECISION_LANDING = 5,
 };
 
 inline int legacy_cuda_model_type_from_name(const char *type_name, int dim_x,
                                             int dim_u) {
+  if (type_name && std::strstr(type_name, "QuadrotorPrecisionLanding")) {
+    return LEGACY_CUDA_QUADROTOR_PRECISION_LANDING;
+  }
   if (type_name && std::strstr(type_name, "Quadrotor")) {
     return LEGACY_CUDA_QUADROTOR;
   }
@@ -53,7 +59,8 @@ legacy_cuda_dynamics(const double *x, const double *u, double *x_dot, int dim_x,
     x_dot[d] = 0.0;
   }
 
-  if (model_type == LEGACY_CUDA_QUADROTOR) {
+  if (model_type == LEGACY_CUDA_QUADROTOR ||
+      model_type == LEGACY_CUDA_QUADROTOR_PRECISION_LANDING) {
     x_dot[0] = x[3];
     x_dot[1] = x[4];
     x_dot[2] = x[5];
@@ -105,6 +112,10 @@ legacy_cuda_terminal_cost(const double *x, const double *x_target, int dim_x,
     return sqrt(s);
   }
 
+  if (model_type == LEGACY_CUDA_QUADROTOR_PRECISION_LANDING) {
+    return quadrotor_landing_cost::terminalCost(x, x_target);
+  }
+
   if (model_type == LEGACY_CUDA_VELO || model_type == LEGACY_CUDA_BICYCLE) {
     for (int d = 0; d < 2; ++d) {
       double diff = x[d] - x_target[d];
@@ -131,7 +142,8 @@ legacy_cuda_terminal_cost(const double *x, const double *x_target, int dim_x,
 __device__ __forceinline__ void legacy_cuda_project_control(double *u, int dim_u,
                                                             int T,
                                                             int model_type) {
-  if (model_type == LEGACY_CUDA_QUADROTOR) {
+  if (model_type == LEGACY_CUDA_QUADROTOR ||
+      model_type == LEGACY_CUDA_QUADROTOR_PRECISION_LANDING) {
     for (int t = 0; t < T; ++t) {
       double u0 = u[0 * T + t];
       double u1 = u[1 * T + t];
@@ -139,7 +151,7 @@ __device__ __forceinline__ void legacy_cuda_project_control(double *u, int dim_u
 
       double norm_u = sqrt(u0 * u0 + u1 * u1 + u2 * u2);
       if (norm_u >= 20.0) {
-        double mask = 1.0 / norm_u;
+        double mask = 20.0 / norm_u;
         u0 *= mask;
         u1 *= mask;
         u2 *= mask;

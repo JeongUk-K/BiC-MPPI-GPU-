@@ -51,6 +51,9 @@ while [[ $# -gt 0 ]]; do
             cat <<EOF
 Usage: ./run_wmrobot_map_285_visualization.sh [options]
 
+Runs the four WMRobot map 285 examples:
+  MPPI, Log-MPPI, Cluster-MPPI, BiC-MPPI
+
 Options:
   --no-build           Run existing build/gpu/vis_* binaries.
   --overwrite          Remove the output directory before writing results.
@@ -79,7 +82,7 @@ if [[ "$NO_BUILD" -eq 0 ]]; then
     bash build_gpu.sh wmrobot_map_285
 fi
 
-for exe in vis_mppi vis_log_mppi vis_cluster_mppi vis_bi_mppi vis_svgd_mppi; do
+for exe in vis_mppi vis_log_mppi vis_cluster_mppi vis_bi_mppi; do
     if [[ ! -x "build/gpu/$exe" ]]; then
         echo "ERROR: build/gpu/$exe not found. Run without --no-build first." >&2
         exit 1
@@ -89,13 +92,11 @@ done
 rm -rf build/vis_data/mppi \
        build/vis_data/log_mppi \
        build/vis_data/cluster_mppi \
-       build/vis_data/bi_mppi \
-       build/vis_data/svgd_mppi
+       build/vis_data/bi_mppi
 rm -f build/result_mppi.csv \
       build/result_log_mppi.csv \
       build/result_cluster_mppi.csv \
-      build/result_bi_mppi.csv \
-      build/result_svgd_mppi.csv
+      build/result_bi_mppi.csv
 
 echo "[run] MPPI"
 (cd build && ./gpu/vis_mppi)
@@ -109,12 +110,9 @@ echo "[run] Cluster-MPPI"
 echo "[run] BiC-MPPI"
 (cd build && ./gpu/vis_bi_mppi)
 
-echo "[run] SVGD-MPPI"
-(cd build && ./gpu/vis_svgd_mppi)
-
 rm -rf "$OUT_DIR/vis_data"
 mkdir -p "$OUT_DIR/vis_data"
-for solver in mppi log_mppi cluster_mppi bi_mppi svgd_mppi; do
+for solver in mppi log_mppi cluster_mppi bi_mppi; do
     if [[ ! -d "build/vis_data/$solver" ]]; then
         echo "ERROR: build/vis_data/$solver was not generated." >&2
         exit 1
@@ -122,7 +120,7 @@ for solver in mppi log_mppi cluster_mppi bi_mppi svgd_mppi; do
     cp -R "build/vis_data/$solver" "$OUT_DIR/vis_data/"
 done
 
-for csv in result_mppi.csv result_log_mppi.csv result_cluster_mppi.csv result_bi_mppi.csv result_svgd_mppi.csv; do
+for csv in result_mppi.csv result_log_mppi.csv result_cluster_mppi.csv result_bi_mppi.csv; do
     if [[ ! -f "build/$csv" ]]; then
         echo "ERROR: build/$csv was not generated." >&2
         exit 1
@@ -154,4 +152,5 @@ echo "  $OUT_DIR/wmrobot_map_285_timing.png"
 echo "  $OUT_DIR/wmrobot_map_285_rollouts.png"
 if [[ "$NO_GIF" -eq 0 ]]; then
     echo "  $OUT_DIR/wmrobot_map_285_paths.gif"
+    echo "  $OUT_DIR/solver_gifs/wmrobot_map_285_{mppi,log_mppi,cluster_mppi,bi_mppi}_paths.gif"
 fi

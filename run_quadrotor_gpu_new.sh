@@ -42,7 +42,7 @@ Usage: ./run_quadrotor_gpu_new.sh [script options] [experiment options]
 
 Script options:
   --no-build       Skip build step
-  --out DIR        Directory to receive result/path/summary CSV files
+  --out DIR        Directory to receive result/path/summary/all-summary CSV files
   --overwrite      Replace existing CSV files in OUT DIR
   --solver NAME    all, mppi, log_mppi, cluster_mppi, bi_mppi, or svgd_mppi
 
@@ -85,6 +85,12 @@ else
 fi
 
 mkdir -p "$OUT_DIR"
+aggregate_summary_out="$OUT_DIR/result_quadrotor_all_summary.csv"
+
+if [ "$OVERWRITE" -ne 1 ] && [ -e "$aggregate_summary_out" ]; then
+    echo "ERROR: aggregate summary CSV already exists in $OUT_DIR. Pass --overwrite." >&2
+    exit 1
+fi
 
 for solver in "${SOLVERS[@]}"; do
     bin="build/gpu/quadrotor_gpu_new_${solver}"
@@ -135,4 +141,16 @@ for solver in "${SOLVERS[@]}"; do
     cp "$src" "$dst"
 done
 
+first_summary=1
+rm -f "$aggregate_summary_out"
+for solver in "${SOLVERS[@]}"; do
+    summary="$OUT_DIR/result_quadrotor_${solver}_summary.csv"
+    if [ "$first_summary" -eq 1 ]; then
+        head -n 1 "$summary" > "$aggregate_summary_out"
+        first_summary=0
+    fi
+    tail -n +2 "$summary" >> "$aggregate_summary_out"
+done
+
 echo "CSV results written to $OUT_DIR"
+echo "Aggregate summary written to $aggregate_summary_out"

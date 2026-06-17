@@ -1,6 +1,6 @@
 #pragma once
 
-#include <quadrotor.h>
+#include <quadrotor_precision_landing.h>
 
 #include <Eigen/Dense>
 
@@ -436,7 +436,7 @@ template <typename Solver>
 inline int runQuadrotorGpuNewOneDirectional(
     int argc, char **argv, const char *variant_token, const char *variant_label) {
   const auto config = parseQuadrotorGpuNewArgs(argc, argv);
-  auto model = Quadrotor();
+  auto model = QuadrotorPrecisionLanding();
   auto param = makeQuadrotorGpuNewMppiParam(config, model);
   const auto target = param.x_target;
 
@@ -485,7 +485,7 @@ template <typename Solver>
 inline int runQuadrotorGpuNewBidirectional(
     int argc, char **argv, const char *variant_token, const char *variant_label) {
   const auto config = parseQuadrotorGpuNewArgs(argc, argv);
-  auto model = Quadrotor();
+  auto model = QuadrotorPrecisionLanding();
   auto param = makeQuadrotorGpuNewBiParam(config, model);
   const auto target = param.x_target;
 
@@ -537,7 +537,7 @@ template <typename Solver>
 inline int runQuadrotorGpuNewSvgd(
     int argc, char **argv, const char *variant_token, const char *variant_label) {
   const auto config = parseQuadrotorGpuNewArgs(argc, argv);
-  auto model = Quadrotor();
+  auto model = QuadrotorPrecisionLanding();
   auto param = makeQuadrotorGpuNewSvgdParam(config, model);
   const auto target = param.x_target;
 

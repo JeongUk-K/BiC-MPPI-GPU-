@@ -33,6 +33,8 @@ public:
   void solve();
   void move();
   double connectionDistance() const;
+  void guideReference(const Eigen::MatrixXd &Uref,
+                      const Eigen::MatrixXd &Xref);
   void setVisLogger(MPPIVisLogger *logger) { vis_logger = logger; }
 
   // ---- Public state (mirrors CPU BiMPPI) ----
@@ -73,6 +75,9 @@ protected:
   std::vector<Eigen::MatrixXd> Xc, Uc;
   std::vector<Eigen::MatrixXd> Ur, Xr;
   std::vector<double> Cr;
+  std::vector<Eigen::MatrixXd> vis_rollout_samples;
+  static constexpr int kMaxSavedBiRollouts = 128;
+  int vis_rollout_samples_per_call = 64;
 
   // GPU buffers (forward)
   double *d_Uf0, *d_Ufi, *d_noise_f, *d_costs_f, *d_Uf_out, *d_Di_f;
@@ -91,6 +96,7 @@ protected:
   curandGenerator_t curand_gen;
 
   int alloc_Nf, alloc_Nb, alloc_Tf, alloc_Tb; // last allocated sizes
+  int alloc_Tr_guide;
 
   // ---- Model-independent callbacks & type ----
   int model_type;
@@ -102,6 +108,7 @@ protected:
   void allocForward();
   void allocBackward();
   void allocGuide();
+  void allocGuideFor(int Tr);
   void freeForward();
   void freeBackward();
   void freeGuide();
@@ -112,6 +119,8 @@ protected:
   void forwardRollout();
   void backwardRawRollout(Eigen::VectorXd &costs, Eigen::MatrixXd &Ui_cpu);
   void forwardRawRollout(Eigen::VectorXd &costs, Eigen::MatrixXd &Ui_cpu);
+  void appendVisRolloutSamples(const Eigen::MatrixXd &Ui_cpu, int N_samples,
+                               int T_steps, bool backward);
   void selectConnection();
   void concatenate();
   void guideMPPI();
@@ -145,6 +154,7 @@ template <typename ModelClass> BiMPPI_GPU::BiMPPI_GPU(ModelClass model) {
   n_circles = n_rects = 0;
   with_map = false;
   alloc_Nf = alloc_Nb = alloc_Tf = alloc_Tb = 0;
+  alloc_Tr_guide = 0;
 
   CURAND_CHECK(curandCreateGenerator(&curand_gen, CURAND_RNG_PSEUDO_DEFAULT));
   CURAND_CHECK(curandSetPseudoRandomGeneratorSeed(

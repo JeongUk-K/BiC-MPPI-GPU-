@@ -5,6 +5,8 @@
 #include <cmath>
 #include <cstring>
 #include <limits>
+#include <stdexcept>
+#include <utility>
 
 
 // Local rollout kernel (ODR-safe: unique name per TU)
@@ -180,6 +182,7 @@ void BiMPPI_GPU::freeGuide() {
     safe_cuda_malloc(&d_Ur0, 0); safe_cuda_malloc(&d_Uri, 0);
     safe_cuda_malloc(&d_noise_r, 0); safe_cuda_malloc(&d_costs_r, 0);
     safe_cuda_malloc(&d_Ur_out, 0);
+    alloc_Tr_guide = 0;
 }
 void BiMPPI_GPU::freeCommon() {
     safe_cuda_malloc(&d_x_init, 0); safe_cuda_malloc(&d_x_target, 0);
@@ -206,14 +209,22 @@ void BiMPPI_GPU::allocBackward() {
 }
 
 void BiMPPI_GPU::allocGuide() {
-    int Tr_max = Tf + Tb;
-    safe_cuda_malloc(&d_Xref, (size_t)dim_x*(Tr_max+1)*sizeof(double));
-    safe_cuda_malloc(&d_Ur0,  (size_t)dim_u*Tr_max*sizeof(double));
-    safe_cuda_malloc(&d_Uri,  (size_t)Nr*dim_u*Tr_max*sizeof(double));
-    size_t ncnt = (size_t)Nr*dim_u*Tr_max; if (ncnt % 2) ncnt++;
+    allocGuideFor(Tf + Tb);
+}
+
+void BiMPPI_GPU::allocGuideFor(int Tr) {
+    if (Tr <= alloc_Tr_guide && d_Xref && d_Ur0 && d_Uri && d_noise_r &&
+        d_costs_r && d_Ur_out) {
+        return;
+    }
+    safe_cuda_malloc(&d_Xref, (size_t)dim_x*(Tr+1)*sizeof(double));
+    safe_cuda_malloc(&d_Ur0,  (size_t)dim_u*Tr*sizeof(double));
+    safe_cuda_malloc(&d_Uri,  (size_t)Nr*dim_u*Tr*sizeof(double));
+    size_t ncnt = (size_t)Nr*dim_u*Tr; if (ncnt % 2) ncnt++;
     safe_cuda_malloc(&d_noise_r, ncnt*sizeof(double));
     safe_cuda_malloc(&d_costs_r, (size_t)Nr*sizeof(double));
-    safe_cuda_malloc(&d_Ur_out,  (size_t)dim_u*Tr_max*sizeof(double));
+    safe_cuda_malloc(&d_Ur_out,  (size_t)dim_u*Tr*sizeof(double));
+    alloc_Tr_guide = Tr;
 }
 
 void BiMPPI_GPU::init(BiMPPIParam p) {
@@ -296,6 +307,50 @@ static Eigen::MatrixXd flat_Di_to_eigen_col(const std::vector<double>& f, int N,
     Eigen::MatrixXd M(du,N);
     for(int i=0;i<N;++i) for(int d=0;d<du;++d) M(d,i)=f[i*du+d];
     return M;
+}
+
+void BiMPPI_GPU::appendVisRolloutSamples(const Eigen::MatrixXd &Ui_cpu,
+                                         int N_samples, int T_steps,
+                                         bool backward) {
+    if (!vis_logger || !vis_logger->enabled || N_samples <= 0 ||
+        T_steps <= 0 || Ui_cpu.rows() < N_samples * dim_u) {
+        return;
+    }
+
+    if (vis_rollout_samples.size() >= kMaxSavedBiRollouts) {
+        return;
+    }
+
+    const std::size_t remaining = kMaxSavedBiRollouts - vis_rollout_samples.size();
+    const int wanted =
+        std::max(1, std::min(vis_rollout_samples_per_call,
+                             static_cast<int>(remaining)));
+    const int stride = std::max(1, static_cast<int>(std::ceil(
+                                       static_cast<double>(N_samples) /
+                                       static_cast<double>(wanted))));
+
+    for (int i = 0; i < N_samples &&
+                    vis_rollout_samples.size() < kMaxSavedBiRollouts;
+         i += stride) {
+        Eigen::MatrixXd X = Eigen::MatrixXd::Zero(dim_x, T_steps + 1);
+        if (!backward) {
+            X.col(0) = x_init;
+            for (int t = 0; t < T_steps; ++t) {
+                const Eigen::VectorXd u =
+                    Ui_cpu.block(i * dim_u, t, dim_u, 1);
+                X.col(t + 1) = X.col(t) + (double)dt * f(X.col(t), u);
+            }
+        } else {
+            X.col(T_steps) = x_target;
+            for (int t = T_steps - 1; t >= 0; --t) {
+                const int u_col = (t == T_steps - 1) ? t : t + 1;
+                const Eigen::VectorXd u =
+                    Ui_cpu.block(i * dim_u, u_col, dim_u, 1);
+                X.col(t) = X.col(t + 1) - (double)dt * f(X.col(t + 1), u);
+            }
+        }
+        vis_rollout_samples.push_back(std::move(X));
+    }
 }
 
 // ── Raw rollout helpers for ablation variants ───────────────────
@@ -452,6 +507,7 @@ void BiMPPI_GPU::forwardRollout() {
     Eigen::VectorXd costs_f=Eigen::Map<Eigen::VectorXd>(hc.data(),Nf);
     Eigen::MatrixXd Ui_f=flat_Ui_to_eigen(hUi,Nf,dim_u,Tf);
     Eigen::MatrixXd Di_f=flat_Di_to_eigen_col(hDi,Nf,dim_u);
+    appendVisRolloutSamples(Ui_f, Nf, Tf, false);
     bool ok=(costs_f.array()<1e7).all();
     clusters_f.clear();
     if(!ok) dbscan(clusters_f,Di_f,costs_f,Nf);
@@ -492,6 +548,7 @@ void BiMPPI_GPU::backwardRollout() {
     Eigen::VectorXd costs_b=Eigen::Map<Eigen::VectorXd>(hc.data(),Nb);
     Eigen::MatrixXd Ui_b=flat_Ui_to_eigen(hUi,Nb,dim_u,Tb);
     Eigen::MatrixXd Di_b=flat_Di_to_eigen_col(hDi,Nb,dim_u);
+    appendVisRolloutSamples(Ui_b, Nb, Tb, true);
     bool ok=(costs_b.array()<1e7).all();
     clusters_b.clear();
     if(!ok) dbscan(clusters_b,Di_b,costs_b,Nb);
@@ -575,6 +632,7 @@ void BiMPPI_GPU::guideMPPI() {
     Ur.clear(); Cr.clear(); Xr.clear();
     for(int r=0;r<(int)joints.size();++r){
         int Tr=Uc[r].cols();
+        allocGuideFor(Tr);
         std::vector<double> xrf(dim_x*(Tr+1));
         for(int d=0;d<dim_x;++d) for(int t=0;t<=Tr;++t) xrf[d*(Tr+1)+t]=Xc[r](d,t);
         CUDA_CHECK(cudaMemcpy(d_Xref,xrf.data(),(size_t)dim_x*(Tr+1)*sizeof(double),cudaMemcpyHostToDevice));
@@ -639,6 +697,122 @@ void BiMPPI_GPU::guideMPPI() {
     Uo=Ur[idx]; Xo=Xr[idx]; u0=Uo.col(0);
 }
 
+void BiMPPI_GPU::guideReference(const Eigen::MatrixXd &Uref,
+                                const Eigen::MatrixXd &Xref) {
+    const int Tr = static_cast<int>(Uref.cols());
+    if (Tr <= 0 || Uref.rows() != dim_u || Xref.rows() != dim_x ||
+        Xref.cols() != Tr + 1) {
+        throw std::runtime_error("Invalid guide reference dimensions");
+    }
+
+    auto t0 = std::chrono::high_resolution_clock::now();
+    allocGuideFor(Tr);
+
+    std::vector<double> xrf(dim_x * (Tr + 1));
+    for (int d = 0; d < dim_x; ++d) {
+        for (int t = 0; t <= Tr; ++t) {
+            xrf[d * (Tr + 1) + t] = Xref(d, t);
+        }
+    }
+    CUDA_CHECK(cudaMemcpy(d_Xref, xrf.data(),
+                          (size_t)dim_x * (Tr + 1) * sizeof(double),
+                          cudaMemcpyHostToDevice));
+
+    auto r0f = eigen_to_flat(Uref, dim_u, Tr);
+    CUDA_CHECK(cudaMemcpy(d_Ur0, r0f.data(), (size_t)dim_u * Tr * sizeof(double),
+                          cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_x_init, x_init.data(), dim_x * sizeof(double),
+                          cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_x_target, x_target.data(), dim_x * sizeof(double),
+                          cudaMemcpyHostToDevice));
+
+    size_t ncnt = (size_t)Nr * dim_u * Tr;
+    if (ncnt % 2) ncnt++;
+    CURAND_CHECK(curandGenerateNormalDouble(curand_gen, d_noise_r, ncnt, 0.0,
+                                            1.0));
+    int B = 256, G = (Nr + B - 1) / B;
+    guide_rollout_kernel<<<G, B>>>(
+        d_Ur0, d_Uri, d_noise_r, d_sigma, d_x_init, d_x_target, d_Xref,
+        d_costs_r, with_map, d_map, map_max_row, map_max_col, map_resolution,
+        d_circles, n_circles, d_rects, n_rects, Nr, dim_u, dim_x, Tr,
+        (double)dt, gamma_u, model_type);
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    std::vector<double> hcr(Nr), hri((size_t)Nr * dim_u * Tr);
+    CUDA_CHECK(cudaMemcpy(hcr.data(), d_costs_r, Nr * sizeof(double),
+                          cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(hri.data(), d_Uri,
+                          (size_t)Nr * dim_u * Tr * sizeof(double),
+                          cudaMemcpyDeviceToHost));
+    Eigen::VectorXd costs_r = Eigen::Map<Eigen::VectorXd>(hcr.data(), Nr);
+    double mc = costs_r.minCoeff();
+    Eigen::VectorXd wts = (-gamma_u * (costs_r.array() - mc)).exp();
+    const double weight_sum = wts.sum();
+    if (std::isfinite(weight_sum) && weight_sum > 0.0) {
+        wts /= weight_sum;
+    } else {
+        wts = Eigen::VectorXd::Constant(Nr, 1.0 / static_cast<double>(Nr));
+    }
+
+    Eigen::MatrixXd Ures = Eigen::MatrixXd::Zero(dim_u, Tr);
+    for (int i = 0; i < Nr; ++i) {
+        for (int d = 0; d < dim_u; ++d) {
+            for (int t = 0; t < Tr; ++t) {
+                Ures(d, t) += wts(i) * hri[i * (dim_u * Tr) + d * Tr + t];
+            }
+        }
+    }
+    h(Ures);
+
+    Eigen::MatrixXd Xi(dim_x, Tr + 1);
+    Xi.col(0) = x_init;
+    double cost = 0.0;
+    for (int t = 0; t < Tr; ++t) {
+        Xi.col(t + 1) = Xi.col(t) + (double)dt * f(Xi.col(t), Ures.col(t));
+        cost += p(Xi.col(t), x_target);
+    }
+    cost += p(Xi.col(Tr), x_target);
+    for (int t = 0; t < Tr + 1; ++t) {
+        if (collision_checker && collision_checker->getCollisionGrid(Xi.col(t))) {
+            cost = 1e8;
+            break;
+        }
+    }
+
+    bool ref_feasible = true;
+    double ref_cost = 0.0;
+    for (int t = 0; t < Xref.cols(); ++t) {
+        if (collision_checker && collision_checker->getCollisionGrid(Xref.col(t))) {
+            ref_feasible = false;
+            break;
+        }
+        ref_cost += p(Xref.col(t), x_target);
+    }
+
+    Ur.clear();
+    Cr.clear();
+    Xr.clear();
+    if (cost >= 1e7 && ref_feasible) {
+        Uo = Uref;
+        Xo = Xref;
+        u0 = Uo.col(0);
+        Ur.push_back(Uref);
+        Cr.push_back(ref_cost);
+        Xr.push_back(Xref);
+    } else {
+        Uo = Ures;
+        Xo = Xi;
+        u0 = Uo.col(0);
+        Ur.push_back(Ures);
+        Cr.push_back(cost);
+        Xr.push_back(Xi);
+    }
+
+    auto t1 = std::chrono::high_resolution_clock::now();
+    elapsed_guide += std::chrono::duration<double>(t1 - t0).count();
+}
+
 void BiMPPI_GPU::partitioningControl() {
     U_f0=Uo.leftCols(Tf);
     U_b0=Eigen::MatrixXd::Zero(dim_u,Tb);
@@ -646,6 +820,7 @@ void BiMPPI_GPU::partitioningControl() {
 
 void BiMPPI_GPU::solve() {
     elapsed_rollout=elapsed_clustering=0.0;
+    vis_rollout_samples.clear();
     start=std::chrono::high_resolution_clock::now();
     backwardRollout(); forwardRollout();
     auto t2=std::chrono::high_resolution_clock::now();
@@ -661,6 +836,9 @@ void BiMPPI_GPU::solve() {
 
     // ── Visualization data export ──
     if (vis_logger && vis_logger->enabled) {
+      if (!vis_rollout_samples.empty()) {
+        vis_logger->saveTrajectories("rollouts", vis_rollout_samples);
+      }
       // Forward cluster trajectories (Xf: clusters_f.size() * dim_x rows)
       std::vector<Eigen::MatrixXd> fwd_trajs;
       for (int ci = 0; ci < (int)clusters_f.size(); ++ci)

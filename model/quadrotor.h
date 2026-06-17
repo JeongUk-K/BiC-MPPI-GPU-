@@ -44,7 +44,7 @@ Quadrotor::Quadrotor() {
   h = [&](Eigen::Ref<Eigen::MatrixXd> U) -> void {
     Eigen::VectorXd norms = U.colwise().norm();
     Eigen::VectorXd normMask =
-        (norms.array() >= 20.0).select(1.0 / norms.array(), 1.0);
+        (norms.array() >= 20.0).select(20.0 / norms.array(), 1.0);
     // U = U.colwise() * normMask.array();
     for (int i = 0; i < U.cols(); ++i) {
       U.col(i).array() *= normMask(i);
