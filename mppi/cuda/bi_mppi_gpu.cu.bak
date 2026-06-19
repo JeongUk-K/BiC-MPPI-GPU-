@@ -303,6 +303,11 @@ static Eigen::MatrixXd flat_Ui_to_eigen(const std::vector<double>& f, int N, int
         M(i*du+d,t)=f[i*(du*T)+d*T+t];
     return M;
 }
+static Eigen::MatrixXd flat_Di_to_eigen_col(const std::vector<double>& f, int N, int du) {
+    Eigen::MatrixXd M(du,N);
+    for(int i=0;i<N;++i) for(int d=0;d<du;++d) M(d,i)=f[i*du+d];
+    return M;
+}
 
 void BiMPPI_GPU::appendVisRolloutSamples(const Eigen::MatrixXd &Ui_cpu,
                                          int N_samples, int T_steps,
@@ -399,148 +404,61 @@ void BiMPPI_GPU::backwardRawRollout(Eigen::VectorXd &costs,
 
 // ── DBSCAN (CPU) ──────────────────────────────────────────────────
 void BiMPPI_GPU::dbscan(std::vector<std::vector<int>>& clusters,
-                         const Eigen::MatrixXd& feature_source,
+                         const Eigen::MatrixXd& Di,
                          const Eigen::VectorXd& costs, int Ns) {
     clusters.clear();
-
-    // feature_source supports two layouts:
-    //   1) dim_feature x Ns       : use as a precomputed feature matrix.
-    //   2) (Ns * dim_u) x T_steps : sampled control sequences Ui_cpu.
-    //      In this case, build a 3-block input feature internally:
-    //        D_i = [mean_{0:T/3} W_u u_i,
-    //               mean_{T/3:2T/3} W_u u_i,
-    //               mean_{2T/3:T} W_u u_i].
-    //      This is distance-equivalent to using W_u (u_i - u_0), because
-    //      the same warm-start u_0 is subtracted from every sample and
-    //      therefore cancels in pairwise DBSCAN distances.
-    constexpr int kNumBlocks = 3;
-    Eigen::MatrixXd block_feature;
-    const Eigen::MatrixXd* feature_ptr = &feature_source;
-
-    const bool source_is_control_sequence =
-        (feature_source.rows() == Ns * dim_u && feature_source.cols() >= kNumBlocks);
-
-    if (source_is_control_sequence) {
-        const int T_steps = static_cast<int>(feature_source.cols());
-        block_feature = Eigen::MatrixXd::Zero(kNumBlocks * dim_u, Ns);
-
-        for (int i = 0; i < Ns; ++i) {
-            for (int b = 0; b < kNumBlocks; ++b) {
-                const int t0 = (b * T_steps) / kNumBlocks;
-                const int t1 = ((b + 1) * T_steps) / kNumBlocks;
-                const int len = std::max(1, t1 - t0);
-
-                for (int d = 0; d < dim_u; ++d) {
-                    double acc = 0.0;
-                    for (int t = t0; t < t1; ++t) {
-                        acc += feature_source(i * dim_u + d, t);
-                    }
-
-                    // W_u.  Keep identity scaling to preserve the original
-                    // epsilon unit as much as possible.  To normalize by the
-                    // sampling standard deviation, replace scale with:
-                    //   std::max(1e-12, std::abs(sigma_diag[d]))
-                    const double scale = 1.0;
-                    block_feature(b * dim_u + d, i) = (acc / static_cast<double>(len)) / scale;
-                }
-            }
-        }
-        feature_ptr = &block_feature;
-    }
-
-    const Eigen::MatrixXd& feature = *feature_ptr;
-
     std::vector<std::vector<int>> upper_neighbors(Ns);
     std::vector<char> valid(Ns, false);
-    std::vector<int> valid_indices;
-    valid_indices.reserve(std::max(0, Ns));
+    for(int i=0;i<Ns;++i) valid[i]=(costs(i)<=1e7);
 
-    constexpr double J_col = 1e8;
-    int best_idx = 0;
-    double best_cost = (Ns > 0) ? costs(0) : 0.0;
-    for (int i = 0; i < Ns; ++i) {
-        if (costs(i) < best_cost) {
-            best_cost = costs(i);
-            best_idx = i;
-        }
-        valid[i] = (costs(i) < J_col);
-        if (valid[i]) valid_indices.push_back(i);
-    }
-
-    // If every sample is collision-penalized, keep the least-cost sample as
-    // the fallback branch instead of averaging all invalid samples.
-    if (valid_indices.empty()) {
-        if (Ns > 0) clusters.push_back(std::vector<int>{best_idx});
-        return;
-    }
-
-    const bool use_squared_distance = (deviation_mu > 0.0 && epsilon > 0.0);
-    const double eps_scaled = use_squared_distance ? epsilon / deviation_mu : 0.0;
-    const double eps_scaled_sq = eps_scaled * eps_scaled;
-
+    const bool use_squared_distance=(deviation_mu>0.0 && epsilon>0.0);
+    const double eps_scaled=use_squared_distance ? epsilon/deviation_mu : 0.0;
+    const double eps_scaled_sq=eps_scaled*eps_scaled;
 #pragma omp parallel for schedule(dynamic,16)
-    for (int i = 0; i < Ns; ++i) {
-        if (!valid[i]) continue;
-        std::vector<int>& neighbors = upper_neighbors[i];
-        for (int j = i + 1; j < Ns; ++j) {
-            if (!valid[j]) continue;
-            double dist_sq = 0.0;
-            for (int d = 0; d < feature.rows(); ++d) {
-                const double diff = feature(d, i) - feature(d, j);
-                dist_sq += diff * diff;
+    for(int i=0;i<Ns;++i){
+        if(!valid[i]) continue;
+        std::vector<int>& neighbors=upper_neighbors[i];
+        for(int j=i+1;j<Ns;++j){
+            if(!valid[j]) continue;
+            double dist_sq=0.0;
+            for(int d=0;d<Di.rows();++d){
+                const double diff=Di(d,i)-Di(d,j);
+                dist_sq+=diff*diff;
             }
-            const bool is_neighbor = use_squared_distance
-                ? (dist_sq < eps_scaled_sq)
-                : (deviation_mu * std::sqrt(dist_sq) < epsilon);
-            if (is_neighbor) neighbors.push_back(j);
+            const bool is_neighbor=use_squared_distance
+                ? (dist_sq<eps_scaled_sq)
+                : (deviation_mu*std::sqrt(dist_sq)<epsilon);
+            if(is_neighbor) neighbors.push_back(j);
         }
     }
 
-    std::vector<size_t> degrees(Ns, 0);
-    for (int i = 0; i < Ns; ++i) {
-        degrees[i] += upper_neighbors[i].size();
-        for (int j : upper_neighbors[i]) ++degrees[j];
+    std::vector<size_t> degrees(Ns,0);
+    for(int i=0;i<Ns;++i){
+        degrees[i]+=upper_neighbors[i].size();
+        for(int j:upper_neighbors[i]) ++degrees[j];
     }
 
     std::vector<std::vector<int>> tree(Ns);
-    for (int i = 0; i < Ns; ++i) tree[i].reserve(degrees[i]);
-    for (int i = 0; i < Ns; ++i) {
-        for (int j : upper_neighbors[i]) {
+    for(int i=0;i<Ns;++i) tree[i].reserve(degrees[i]);
+    for(int i=0;i<Ns;++i){
+        for(int j:upper_neighbors[i]){
             tree[i].push_back(j);
             tree[j].push_back(i);
         }
     }
 
-    std::vector<char> core(Ns, false);
-    for (int i = 0; i < Ns; ++i) {
-        if ((int)tree[i].size() > minpts) core[i] = true;
-    }
-
-    std::vector<char> vis(Ns, false);
-    for (int i = 0; i < Ns; ++i) {
-        if (!core[i] || vis[i]) continue;
-        std::deque<int> q;
-        std::vector<int> cl;
-        q.push_back(i);
-        cl.push_back(i);
-        vis[i] = true;
-        while (!q.empty()) {
-            const int n = q.front();
-            q.pop_front();
-            for (int nb : tree[n]) {
-                if (vis[nb]) continue;
-                vis[nb] = true;
-                cl.push_back(nb);
-                if (core[nb]) q.push_back(nb);
-            }
+    std::vector<char> core(Ns,false);
+    for(int i=0;i<Ns;++i) if((int)tree[i].size()>minpts) core[i]=true;
+    std::vector<char> vis(Ns,false);
+    for(int i=0;i<Ns;++i){
+        if(!core[i]||vis[i]) continue;
+        std::deque<int> q; std::vector<int> cl;
+        q.push_back(i); cl.push_back(i); vis[i]=true;
+        while(!q.empty()){
+            int n=q.front(); q.pop_front();
+            for(int nb:tree[n]){ if(vis[nb]) continue; vis[nb]=true; cl.push_back(nb); if(core[nb]) q.push_back(nb); }
         }
         clusters.push_back(cl);
-    }
-
-    // DBSCAN may classify all valid samples as noise.  In that case, retain a
-    // single fallback cluster containing only valid samples.
-    if (clusters.empty()) {
-        clusters.push_back(std::move(valid_indices));
     }
 }
 
@@ -582,14 +500,17 @@ void BiMPPI_GPU::forwardRollout() {
     auto t1=std::chrono::high_resolution_clock::now();
     elapsed_rollout+=std::chrono::duration<double>(t1-t0).count();
 
-    std::vector<double> hc(Nf), hUi((size_t)Nf * dim_u * Tf);
-    CUDA_CHECK(cudaMemcpy(hc.data(), d_costs_f, Nf * sizeof(double), cudaMemcpyDeviceToHost));
-    CUDA_CHECK(cudaMemcpy(hUi.data(), d_Ufi, (size_t)Nf * dim_u * Tf * sizeof(double), cudaMemcpyDeviceToHost));
-    Eigen::VectorXd costs_f = Eigen::Map<Eigen::VectorXd>(hc.data(), Nf);
-    Eigen::MatrixXd Ui_f = flat_Ui_to_eigen(hUi, Nf, dim_u, Tf);
+    std::vector<double> hc(Nf),hUi((size_t)Nf*dim_u*Tf),hDi((size_t)Nf*dim_u);
+    CUDA_CHECK(cudaMemcpy(hc.data(), d_costs_f,Nf*sizeof(double),cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(hUi.data(),d_Ufi,(size_t)Nf*dim_u*Tf*sizeof(double),cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(hDi.data(),d_Di_f,(size_t)Nf*dim_u*sizeof(double),cudaMemcpyDeviceToHost));
+    Eigen::VectorXd costs_f=Eigen::Map<Eigen::VectorXd>(hc.data(),Nf);
+    Eigen::MatrixXd Ui_f=flat_Ui_to_eigen(hUi,Nf,dim_u,Tf);
+    Eigen::MatrixXd Di_f=flat_Di_to_eigen_col(hDi,Nf,dim_u);
     appendVisRolloutSamples(Ui_f, Nf, Tf, false);
+    bool ok=(costs_f.array()<1e7).all();
     clusters_f.clear();
-    dbscan(clusters_f, Ui_f, costs_f, Nf);
+    if(!ok) dbscan(clusters_f,Di_f,costs_f,Nf);
     if(clusters_f.empty()) clusters_f.push_back(full_cluster_f);
     calculateU(Uf,clusters_f,costs_f,Ui_f,Tf);
     Xf.resize(clusters_f.size()*dim_x,Tf+1);
@@ -620,14 +541,17 @@ void BiMPPI_GPU::backwardRollout() {
     auto t1=std::chrono::high_resolution_clock::now();
     elapsed_rollout+=std::chrono::duration<double>(t1-t0).count();
 
-    std::vector<double> hc(Nb), hUi((size_t)Nb * dim_u * Tb);
-    CUDA_CHECK(cudaMemcpy(hc.data(), d_costs_b, Nb * sizeof(double), cudaMemcpyDeviceToHost));
-    CUDA_CHECK(cudaMemcpy(hUi.data(), d_Ubi, (size_t)Nb * dim_u * Tb * sizeof(double), cudaMemcpyDeviceToHost));
-    Eigen::VectorXd costs_b = Eigen::Map<Eigen::VectorXd>(hc.data(), Nb);
-    Eigen::MatrixXd Ui_b = flat_Ui_to_eigen(hUi, Nb, dim_u, Tb);
+    std::vector<double> hc(Nb),hUi((size_t)Nb*dim_u*Tb),hDi((size_t)Nb*dim_u);
+    CUDA_CHECK(cudaMemcpy(hc.data(), d_costs_b,Nb*sizeof(double),cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(hUi.data(),d_Ubi,(size_t)Nb*dim_u*Tb*sizeof(double),cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(hDi.data(),d_Di_b,(size_t)Nb*dim_u*sizeof(double),cudaMemcpyDeviceToHost));
+    Eigen::VectorXd costs_b=Eigen::Map<Eigen::VectorXd>(hc.data(),Nb);
+    Eigen::MatrixXd Ui_b=flat_Ui_to_eigen(hUi,Nb,dim_u,Tb);
+    Eigen::MatrixXd Di_b=flat_Di_to_eigen_col(hDi,Nb,dim_u);
     appendVisRolloutSamples(Ui_b, Nb, Tb, true);
+    bool ok=(costs_b.array()<1e7).all();
     clusters_b.clear();
-    dbscan(clusters_b, Ui_b, costs_b, Nb);
+    if(!ok) dbscan(clusters_b,Di_b,costs_b,Nb);
     if(clusters_b.empty()) clusters_b.push_back(full_cluster_b);
     calculateU(Ub,clusters_b,costs_b,Ui_b,Tb);
     Xb.resize(clusters_b.size()*dim_x,Tb+1);

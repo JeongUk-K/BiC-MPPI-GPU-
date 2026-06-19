@@ -3,6 +3,6 @@ build/
 eigen/
 matplotlibcpp/
 EigenRand/
-BARN_dataset/txt_files
+BARN_dataset
 results/
 result/

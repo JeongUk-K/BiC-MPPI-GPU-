@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "quadrotor_path_logger.h"
+#include "quadrotor_gpu_vis.h"
 
 namespace {
 
@@ -24,6 +25,8 @@ struct QuadrotorLogMppiConfig {
   int maxiter = 200;
   int map_begin = 299;
   int num_maps = 300;
+  int vis_every = 1;
+  bool save_rollouts = true;
   std::string dataset_dir = "../BARN_dataset/txt_files";
 };
 
@@ -70,7 +73,9 @@ void printUsage(const char *argv0) {
             << "  --maxiter N          Max closed-loop iterations per run\n"
             << "  --T N                Horizon length\n"
             << "  --N N                Number of rollout samples\n"
-            << "  --dataset-dir DIR    BARN txt file directory\n";
+            << "  --dataset-dir DIR    BARN txt file directory\n"
+            << "  --vis-every N        Save rollout data every N iterations\n"
+            << "  --no-rollouts        Save CSV files only\n";
 }
 
 QuadrotorLogMppiConfig parseArgs(int argc, char **argv) {
@@ -92,6 +97,7 @@ QuadrotorLogMppiConfig parseArgs(int argc, char **argv) {
       config.N = 256;
       config.maxiter = 10;
       config.num_maps = 3;
+      config.vis_every = 1;
     } else if (key == "--num-maps") {
       config.num_maps = std::stoi(require_value(key));
     } else if (key == "--map-begin") {
@@ -104,6 +110,10 @@ QuadrotorLogMppiConfig parseArgs(int argc, char **argv) {
       config.N = std::stoi(require_value(key));
     } else if (key == "--dataset-dir") {
       config.dataset_dir = require_value(key);
+    } else if (key == "--vis-every") {
+      config.vis_every = std::stoi(require_value(key));
+    } else if (key == "--no-rollouts") {
+      config.save_rollouts = false;
     } else {
       throw std::runtime_error("Unknown option: " + key);
     }
@@ -192,6 +202,12 @@ int main(int argc, char **argv) {
          "elapsed_connection,elapsed_guide,f_err\n";
   std::ofstream path_csv("path_quadrotor_log_mppi.csv");
   writeQuadrotorPathHeader(path_csv);
+  std::ofstream progress_csv("result_quadrotor_log_mppi_progress.csv");
+  csv << std::flush;
+  progress_csv << "map,is_failed,is_landed,iter,elapsed,elapsed_rollout,elapsed_"
+                  "clustering,"
+                  "elapsed_connection,elapsed_guide,f_err\n";
+  progress_csv << std::flush;
   std::vector<QuadrotorLogMppiRun> runs;
 
   for (int map = config.map_begin;
@@ -205,6 +221,13 @@ int main(int argc, char **argv) {
     solver.U_0.row(2).array() += model.g;
     solver.init(param);
     solver.setCollisionChecker(&collision_checker);
+
+    MPPIVisLogger vis_logger;
+    initQuadrotorGpuVisLogger(vis_logger, config.save_rollouts, "log_mppi",
+                              map, model.dim_x, param.T, collision_checker,
+                              param.x_init, param.x_target);
+    solver.setVisLogger(&vis_logger);
+
     writeQuadrotorPathRow(path_csv, "log_mppi", map, 0, solver.x_init);
 
     bool is_landed = false;
@@ -217,7 +240,10 @@ int main(int argc, char **argv) {
     double total_guide = 0.0;
     double f_err = 0.0;
     for (i = 0; i < maxiter; ++i) {
+      beginQuadrotorGpuVisStep(vis_logger, config.save_rollouts,
+                               config.vis_every, i);
       solver.solve();
+      endQuadrotorGpuVisStep(vis_logger);
       solver.move();
       writeQuadrotorPathRow(path_csv, "log_mppi", map, i + 1,
                             solver.x_init);
@@ -228,31 +254,48 @@ int main(int argc, char **argv) {
       total_connection += solver.elapsed_connection;
       total_guide += solver.elapsed_guide;
 
+      f_err = (solver.x_init.head(2) - param.x_target.head(2)).norm();
       if (collision_checker.getCollisionGrid(solver.x_init)) {
+        progress_csv << map << ',' << is_failed << ',' << is_landed << ','
+                     << i << ',' << total_elapsed << ',' << total_rollout
+                     << ',' << total_clustering << ',' << total_connection
+                     << ',' << total_guide << ',' << f_err << '\n'
+                     << std::flush;
         break;
       } else {
-        f_err = (solver.x_init.head(2) - param.x_target.head(2)).norm();
         if (solver.x_init(2) < 0) {
           is_landed = true;
           if (f_err < 0.3) {
             is_failed = false;
           }
+          progress_csv << map << ',' << is_failed << ',' << is_landed << ','
+                       << i << ',' << total_elapsed << ',' << total_rollout
+                       << ',' << total_clustering << ',' << total_connection
+                       << ',' << total_guide << ',' << f_err << '\n'
+                       << std::flush;
           break;
         }
       }
+      progress_csv << map << ',' << is_failed << ',' << is_landed << ',' << i
+                   << ',' << total_elapsed << ',' << total_rollout << ','
+                   << total_clustering << ',' << total_connection << ','
+                   << total_guide << ',' << f_err << '\n'
+                   << std::flush;
     }
     std::cout << map << '\t' << is_failed << '\t' << is_landed << '\t' << i
               << '\t' << total_elapsed << std::endl;
     csv << map << ',' << is_failed << ',' << is_landed << ',' << i << ','
         << total_elapsed << ',' << total_rollout << ',' << total_clustering
         << ',' << total_connection << ',' << total_guide << ',' << f_err
-        << '\n';
+        << '\n'
+        << std::flush;
     runs.push_back({map, is_failed, is_landed, i, total_elapsed, total_rollout,
                     total_clustering, total_connection, total_guide, f_err});
   }
 
   csv.close();
   path_csv.close();
+  progress_csv.close();
   writeSummaryCsv(runs);
   return 0;
 }

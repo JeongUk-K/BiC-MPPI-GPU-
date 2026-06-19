@@ -2,6 +2,7 @@
 #include <wmrobot_map.h>
 
 #include "wmrobot_gpu_stats.h"
+#include "wmrobot_gpu_vis.h"
 
 #include <Eigen/Dense>
 #include <chrono>
@@ -20,6 +21,8 @@ struct LogMppiConfig {
   int map_begin = 299;
   int num_maps = 300;
   int start_cases = 2;
+  int vis_every = 1;
+  bool save_rollouts = true;
   std::string dataset_dir = "../BARN_dataset/txt_files";
 };
 
@@ -37,7 +40,9 @@ void printUsage(const char *argv0) {
             << "  --maxiter N          Max closed-loop iterations per run\n"
             << "  --T N                Horizon length\n"
             << "  --N N                Number of rollout samples\n"
-            << "  --dataset-dir DIR    BARN txt file directory\n";
+            << "  --dataset-dir DIR    BARN txt file directory\n"
+            << "  --vis-every N        Save rollout data every N iterations\n"
+            << "  --no-rollouts        Save CSV files only\n";
 }
 
 LogMppiConfig parseArgs(int argc, char **argv) {
@@ -60,6 +65,7 @@ LogMppiConfig parseArgs(int argc, char **argv) {
       config.maxiter = 10;
       config.num_maps = 3;
       config.start_cases = 1;
+      config.vis_every = 1;
     } else if (key == "--num-maps") {
       config.num_maps = std::stoi(require_value(key));
     } else if (key == "--map-begin") {
@@ -74,6 +80,10 @@ LogMppiConfig parseArgs(int argc, char **argv) {
       config.N = std::stoi(require_value(key));
     } else if (key == "--dataset-dir") {
       config.dataset_dir = require_value(key);
+    } else if (key == "--vis-every") {
+      config.vis_every = std::stoi(require_value(key));
+    } else if (key == "--no-rollouts") {
+      config.save_rollouts = false;
     } else {
       throw std::runtime_error("Unknown option: " + key);
     }
@@ -110,6 +120,11 @@ int main(int argc, char **argv) {
 
   std::ofstream csv("result_log_mppi.csv");
   writeWmrobotGpuRunHeader(csv);
+  csv.flush();
+
+  std::ofstream progress_csv("result_log_mppi_progress.csv");
+  writeWmrobotGpuRunHeader(progress_csv);
+  progress_csv.flush();
 
   for (int s = 0; s < config.start_cases; ++s) {
     switch (s) {
@@ -136,13 +151,22 @@ int main(int argc, char **argv) {
       solver.init(param);
       solver.setCollisionChecker(&collision_checker);
 
+      MPPIVisLogger vis_logger;
+      initWmrobotGpuVisLogger(vis_logger, config.save_rollouts, "log_mppi", s,
+                              map, model.dim_x, param.T, collision_checker,
+                              param.x_init, param.x_target);
+      solver.setVisLogger(&vis_logger);
+
       WmrobotGpuRunResult row;
       row.variant = variant;
       row.start_case = s;
       row.map_id = map;
 
       for (row.iter = 0; row.iter < maxiter; ++row.iter) {
+        beginWmrobotGpuVisStep(vis_logger, config.save_rollouts,
+                               config.vis_every, row.iter);
         solver.solve();
+        endWmrobotGpuVisStep(vis_logger);
         solver.move();
 
         row.elapsed += solver.elapsed;
@@ -151,27 +175,35 @@ int main(int argc, char **argv) {
         row.elapsed_connection += solver.elapsed_connection;
         row.elapsed_guide += solver.elapsed_guide;
 
+        row.d_goal = (solver.x_init - param.x_target).norm();
         if (collision_checker.getCollisionGrid(solver.x_init)) {
           row.is_collision = true;
+          writeWmrobotGpuRunRow(progress_csv, row);
+          progress_csv.flush();
           break;
         } else {
-          row.d_goal = (solver.x_init - param.x_target).norm();
           if (row.d_goal < 0.1) {
             row.is_success = true;
+            writeWmrobotGpuRunRow(progress_csv, row);
+            progress_csv.flush();
             break;
           }
         }
+        writeWmrobotGpuRunRow(progress_csv, row);
+        progress_csv.flush();
       }
       if (row.iter >= maxiter) {
         row.iter = maxiter;
       }
       printWmrobotGpuRunRow(std::cout, row);
       writeWmrobotGpuRunRow(csv, row);
+      csv.flush();
       runs.push_back(row);
     }
   }
 
   csv.close();
+  progress_csv.close();
 
   const auto summary = summarizeWmrobotGpuRuns(variant, runs);
   std::ofstream summary_csv("result_log_mppi_summary.csv");

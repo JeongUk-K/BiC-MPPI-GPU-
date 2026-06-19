@@ -44,51 +44,143 @@ DEFINE_FORWARD_ROLLOUT_KERNEL(cluster_rollout_kernel)
 
 ClusterMPPI_GPU::~ClusterMPPI_GPU() {}
 
-// ---- DBSCAN (CPU, identical logic to CPU ClusterMPPI) ----
+// ---- DBSCAN (CPU, aligned with BiMPPI_GPU) ----
 void ClusterMPPI_GPU::dbscan(std::vector<std::vector<int>> &clusters,
-                              const Eigen::MatrixXd &Di,
+                              const Eigen::MatrixXd &feature_source,
                               const Eigen::VectorXd &costs,
                               int N_samples, int T_steps) {
   clusters.clear();
-  std::vector<bool> core_pts(N_samples, false);
-  std::map<int, std::vector<int>> core_tree;
 
-#pragma omp parallel for
-  for (int i = 0; i < N_samples; ++i) {
-    if (costs(i) > 1e7) continue;
-    for (int j = i + 1; j < N_samples; ++j) {
-      if (costs(j) > 1e7) continue;
-      if (deviation_mu * (Di.col(i) - Di.col(j)).norm() < epsilon) {
-#pragma omp critical
-        {
-          core_tree[i].push_back(j);
-          core_tree[j].push_back(i);
+  // feature_source supports two layouts:
+  //   1) dim_feature x N_samples       : use as a precomputed feature matrix.
+  //   2) (N_samples * dim_u) x T_steps : sampled control sequences Ui_cpu.
+  //      In this case, build a 3-block input feature internally:
+  //        D_i = [mean_{0:T/3} W_u u_i,
+  //               mean_{T/3:2T/3} W_u u_i,
+  //               mean_{2T/3:T} W_u u_i].
+  //      The shared warm-start control cancels in pairwise distances.
+  constexpr int kNumBlocks = 3;
+  Eigen::MatrixXd block_feature;
+  const Eigen::MatrixXd *feature_ptr = &feature_source;
+
+  const bool source_is_control_sequence =
+      (feature_source.rows() == N_samples * dim_u &&
+       feature_source.cols() == T_steps && T_steps > 0);
+
+  if (source_is_control_sequence) {
+    const int feature_T = static_cast<int>(feature_source.cols());
+    block_feature = Eigen::MatrixXd::Zero(kNumBlocks * dim_u, N_samples);
+
+    for (int i = 0; i < N_samples; ++i) {
+      for (int b = 0; b < kNumBlocks; ++b) {
+        const int t0 = (b * feature_T) / kNumBlocks;
+        const int t1 = ((b + 1) * feature_T) / kNumBlocks;
+        const int len = std::max(1, t1 - t0);
+
+        for (int d = 0; d < dim_u; ++d) {
+          double acc = 0.0;
+          for (int t = t0; t < t1; ++t) {
+            acc += feature_source(i * dim_u + d, t);
+          }
+
+          const double scale = 1.0;
+          block_feature(b * dim_u + d, i) =
+              (acc / static_cast<double>(len)) / scale;
         }
       }
     }
+    feature_ptr = &block_feature;
   }
 
-  for (int i = 0; i < N_samples; ++i)
-    if ((int)core_tree[i].size() > minpts) core_pts[i] = true;
+  const Eigen::MatrixXd &feature = *feature_ptr;
 
-  std::vector<bool> visited(N_samples, false);
+  std::vector<std::vector<int>> upper_neighbors(N_samples);
+  std::vector<char> valid(N_samples, false);
+  std::vector<int> valid_indices;
+  valid_indices.reserve(std::max(0, N_samples));
+
+  constexpr double J_col = 1e8;
+  int best_idx = 0;
+  double best_cost = (N_samples > 0) ? costs(0) : 0.0;
   for (int i = 0; i < N_samples; ++i) {
-    if (!core_pts[i] || visited[i]) continue;
+    if (costs(i) < best_cost) {
+      best_cost = costs(i);
+      best_idx = i;
+    }
+    valid[i] = (costs(i) < J_col);
+    if (valid[i]) valid_indices.push_back(i);
+  }
+
+  if (valid_indices.empty()) {
+    if (N_samples > 0) clusters.push_back(std::vector<int>{best_idx});
+    return;
+  }
+
+  const bool use_squared_distance = (deviation_mu > 0.0 && epsilon > 0.0);
+  const double eps_scaled = use_squared_distance ? epsilon / deviation_mu : 0.0;
+  const double eps_scaled_sq = eps_scaled * eps_scaled;
+
+#pragma omp parallel for schedule(dynamic, 16)
+  for (int i = 0; i < N_samples; ++i) {
+    if (!valid[i]) continue;
+    std::vector<int> &neighbors = upper_neighbors[i];
+    for (int j = i + 1; j < N_samples; ++j) {
+      if (!valid[j]) continue;
+      double dist_sq = 0.0;
+      for (int d = 0; d < feature.rows(); ++d) {
+        const double diff = feature(d, i) - feature(d, j);
+        dist_sq += diff * diff;
+      }
+      const bool is_neighbor = use_squared_distance
+                                   ? (dist_sq < eps_scaled_sq)
+                                   : (deviation_mu * std::sqrt(dist_sq) < epsilon);
+      if (is_neighbor) neighbors.push_back(j);
+    }
+  }
+
+  std::vector<size_t> degrees(N_samples, 0);
+  for (int i = 0; i < N_samples; ++i) {
+    degrees[i] += upper_neighbors[i].size();
+    for (int j : upper_neighbors[i]) ++degrees[j];
+  }
+
+  std::vector<std::vector<int>> tree(N_samples);
+  for (int i = 0; i < N_samples; ++i) tree[i].reserve(degrees[i]);
+  for (int i = 0; i < N_samples; ++i) {
+    for (int j : upper_neighbors[i]) {
+      tree[i].push_back(j);
+      tree[j].push_back(i);
+    }
+  }
+
+  std::vector<char> core(N_samples, false);
+  for (int i = 0; i < N_samples; ++i) {
+    if ((int)tree[i].size() > minpts) core[i] = true;
+  }
+
+  std::vector<char> visited(N_samples, false);
+  for (int i = 0; i < N_samples; ++i) {
+    if (!core[i] || visited[i]) continue;
     std::deque<int> branch;
     std::vector<int> cluster;
     branch.push_back(i);
     cluster.push_back(i);
     visited[i] = true;
     while (!branch.empty()) {
-      int now = branch.front(); branch.pop_front();
-      for (int nb : core_tree[now]) {
+      const int now = branch.front();
+      branch.pop_front();
+      for (int nb : tree[now]) {
         if (visited[nb]) continue;
         visited[nb] = true;
         cluster.push_back(nb);
-        if (core_pts[nb]) branch.push_back(nb);
+        if (core[nb]) branch.push_back(nb);
       }
     }
     clusters.push_back(cluster);
+  }
+
+  if (clusters.empty()) {
+    clusters.push_back(std::move(valid_indices));
   }
 }
 
@@ -150,7 +242,8 @@ void ClusterMPPI_GPU::solve() {
   auto t_cluster_start = std::chrono::high_resolution_clock::now();
   elapsed_rollout = std::chrono::duration<double>(t_cluster_start - start).count();
 
-  // Copy costs + Ui + Di to host for clustering
+  // Copy costs + Ui to host for clustering.  DBSCAN builds the same 3-block
+  // feature representation as BiMPPI_GPU from the sampled control sequences.
   std::vector<double> h_costs(N);
   CUDA_CHECK(cudaMemcpy(h_costs.data(), d_costs, N * sizeof(double), cudaMemcpyDeviceToHost));
 
@@ -164,21 +257,11 @@ void ClusterMPPI_GPU::solve() {
       for (int t = 0; t < T; ++t)
         Ui_cpu(i * dim_u + d, t) = h_Ui_flat[i * (dim_u * T) + d * T + t];
 
-  // Di host copy
-  std::vector<double> h_Di_flat((size_t)N * dim_u);
-  CUDA_CHECK(cudaMemcpy(h_Di_flat.data(), d_Di,
-                        (size_t)N * dim_u * sizeof(double), cudaMemcpyDeviceToHost));
-  Eigen::MatrixXd Di_cpu(dim_u, N);
-  for (int i = 0; i < N; ++i)
-    for (int d = 0; d < dim_u; ++d)
-      Di_cpu(d, i) = h_Di_flat[i * dim_u + d];
-
   Eigen::VectorXd costs_cpu = Eigen::Map<Eigen::VectorXd>(h_costs.data(), N);
 
   // --- DBSCAN clustering (CPU) ---
-  bool all_feasible = (costs_cpu.array() < 1e7).all();
   std::vector<std::vector<int>> clusters;
-  if (!all_feasible) dbscan(clusters, Di_cpu, costs_cpu, N, T);
+  dbscan(clusters, Ui_cpu, costs_cpu, N, T);
   if (clusters.empty()) clusters.push_back(full_cluster);
   calculateU(U, clusters, costs_cpu, Ui_cpu, T);
 

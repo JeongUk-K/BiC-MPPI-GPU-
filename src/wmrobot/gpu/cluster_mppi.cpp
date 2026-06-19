@@ -2,13 +2,16 @@
 #include <wmrobot_map.h>
 
 #include "wmrobot_gpu_stats.h"
+#include "wmrobot_gpu_vis.h"
 
 #include <Eigen/Dense>
 #include <chrono>
 #include <fstream>
 #include <iostream>
+#include <stdexcept>
+#include <string>
 
-int main() {
+int main(int argc, char **argv) {
   auto model = WMRobotMap();
 
   using Solver = ClusterMPPI_GPU;
@@ -27,17 +30,82 @@ int main() {
   sigma_u << 0.6, 0.6;
   param.sigma_u = sigma_u.asDiagonal();
 
+  int map_begin = 299;
+  int num_maps = 300;
+  int start_cases = 2;
   int maxiter = 200;
+  int vis_every = 1;
+  bool save_rollouts = true;
+  std::string dataset_dir = "../BARN_dataset/txt_files";
+
+  for (int i = 1; i < argc; ++i) {
+    const std::string key = argv[i];
+    auto require_value = [&](const std::string &name) -> std::string {
+      if (i + 1 >= argc) {
+        throw std::runtime_error("Missing value for " + name);
+      }
+      return argv[++i];
+    };
+
+    if (key == "--smoke") {
+      map_begin = 299;
+      num_maps = 1;
+      start_cases = 1;
+      maxiter = 2;
+      param.T = 20;
+      param.N = 256;
+      vis_every = 1;
+    } else if (key == "--map-begin") {
+      map_begin = std::stoi(require_value(key));
+    } else if (key == "--num-maps") {
+      num_maps = std::stoi(require_value(key));
+    } else if (key == "--start-cases") {
+      start_cases = std::stoi(require_value(key));
+    } else if (key == "--maxiter") {
+      maxiter = std::stoi(require_value(key));
+    } else if (key == "--T") {
+      param.T = std::stoi(require_value(key));
+    } else if (key == "--N") {
+      param.N = std::stoi(require_value(key));
+    } else if (key == "--dataset-dir") {
+      dataset_dir = require_value(key);
+    } else if (key == "--vis-every") {
+      vis_every = std::stoi(require_value(key));
+    } else if (key == "--no-rollouts") {
+      save_rollouts = false;
+    } else if (key == "--help" || key == "-h") {
+      std::cout
+          << "Usage: wmrobot_cluster_mppi [options]\n"
+          << "  --smoke              Run one tiny validation case\n"
+          << "  --map-begin N        First BARN map id. Default: 299\n"
+          << "  --num-maps N         Number of maps descending from map-begin. Default: 300\n"
+          << "  --start-cases N      Number of start cases. Default: 2\n"
+          << "  --maxiter N          Max closed-loop iterations. Default: 200\n"
+          << "  --T N                Horizon. Default: 100\n"
+          << "  --N N                Rollout count. Default: 10000\n"
+          << "  --dataset-dir DIR    BARN txt file directory\n"
+          << "  --vis-every N        Save rollout data every N iterations. Default: 1\n"
+          << "  --no-rollouts        Save CSV files only\n";
+      return 0;
+    } else {
+      throw std::runtime_error("Unknown argument: " + key);
+    }
+  }
 
   const std::string variant = "Cluster-MPPI";
   std::vector<WmrobotGpuRunResult> runs;
 
   std::ofstream csv("result_cluster_mppi.csv");
   writeWmrobotGpuRunHeader(csv);
+  csv.flush();
+
+  std::ofstream progress_csv("result_cluster_mppi_progress.csv");
+  writeWmrobotGpuRunHeader(progress_csv);
+  progress_csv.flush();
   // for (int map = 299; map >= 0 ; --map) {
   // for (int map = 276; map >= 0; --map) {
   // for (int s = 1; s < 2; ++s) {
-  for (int s = 0; s < 2; ++s) {
+  for (int s = 0; s < start_cases; ++s) {
     switch (s) {
     case 0:
       param.x_init(0) = 0.5;
@@ -51,16 +119,22 @@ int main() {
     default:
       break;
     }
-    for (int map = 299; map >= 0; --map) {
+    for (int map = map_begin; map >= 0 && map > map_begin - num_maps; --map) {
       // for (int map = 0; map < 300; ++map) {
       CollisionChecker collision_checker = CollisionChecker();
-      collision_checker.loadMap("../BARN_dataset/txt_files/output_" +
+      collision_checker.loadMap(dataset_dir + "/output_" +
                                     std::to_string(map) + ".txt",
                                 0.1);
       Solver solver(model);
       solver.U_0 = Eigen::MatrixXd::Zero(model.dim_u, param.T);
       solver.init(param);
       solver.setCollisionChecker(&collision_checker);
+
+      MPPIVisLogger vis_logger;
+      initWmrobotGpuVisLogger(vis_logger, save_rollouts, "cluster_mppi", s,
+                              map, model.dim_x, param.T, collision_checker,
+                              param.x_init, param.x_target);
+      solver.setVisLogger(&vis_logger);
 
       WmrobotGpuRunResult row;
       row.variant = variant;
@@ -69,7 +143,9 @@ int main() {
 
       for (row.iter = 0; row.iter < maxiter; ++row.iter) {
 
+        beginWmrobotGpuVisStep(vis_logger, save_rollouts, vis_every, row.iter);
         solver.solve();
+        endWmrobotGpuVisStep(vis_logger);
         solver.move();
 
         row.elapsed += solver.elapsed;
@@ -80,16 +156,22 @@ int main() {
 
         // std::cout<<"1 solved in "<<solver.elapsed_1.count()<<std::endl;
 
+        row.d_goal = (solver.x_init - param.x_target).norm();
         if (collision_checker.getCollisionGrid(solver.x_init)) {
           row.is_collision = true;
+          writeWmrobotGpuRunRow(progress_csv, row);
+          progress_csv.flush();
           break;
         } else {
-          row.d_goal = (solver.x_init - param.x_target).norm();
           if (row.d_goal < 0.1) {
             row.is_success = true;
+            writeWmrobotGpuRunRow(progress_csv, row);
+            progress_csv.flush();
             break;
           }
         }
+        writeWmrobotGpuRunRow(progress_csv, row);
+        progress_csv.flush();
         // solver.show();
       }
       if (row.iter >= maxiter) {
@@ -97,12 +179,14 @@ int main() {
       }
       printWmrobotGpuRunRow(std::cout, row);
       writeWmrobotGpuRunRow(csv, row);
+      csv.flush();
       runs.push_back(row);
       // solver.showTraj();
     }
   }
 
   csv.close();
+  progress_csv.close();
 
   const auto summary = summarizeWmrobotGpuRuns(variant, runs);
   std::ofstream summary_csv("result_cluster_mppi_summary.csv");

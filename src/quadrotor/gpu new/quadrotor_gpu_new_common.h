@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "../gpu/quadrotor_path_logger.h"
+#include "../gpu/quadrotor_gpu_vis.h"
 
 struct QuadrotorGpuNewConfig {
   int T = 100;
@@ -39,6 +40,8 @@ struct QuadrotorGpuNewConfig {
   double eps_xy = 0.30;
   double eps_vxy = 0.50;
   double eps_vz = 1.00;
+  int vis_every = 1;
+  bool save_rollouts = true;
   std::string dataset_dir = "../BARN_dataset/txt_files";
 };
 
@@ -119,7 +122,9 @@ inline void printQuadrotorGpuNewUsage(const char *argv0) {
             << "  --Nr N               Guide rollout samples\n"
             << "  --Ns N               SVGD surrogate samples\n"
             << "  --istep N            SVGD inner iterations\n"
-            << "  --dataset-dir DIR    BARN txt file directory\n";
+            << "  --dataset-dir DIR    BARN txt file directory\n"
+            << "  --vis-every N        Save rollout data every N iterations\n"
+            << "  --no-rollouts        Save CSV files only\n";
 }
 
 inline QuadrotorGpuNewConfig parseQuadrotorGpuNewArgs(int argc, char **argv) {
@@ -148,6 +153,7 @@ inline QuadrotorGpuNewConfig parseQuadrotorGpuNewArgs(int argc, char **argv) {
       config.istep = 2;
       config.maxiter = 10;
       config.num_maps = 3;
+      config.vis_every = 1;
     } else if (key == "--num-maps") {
       config.num_maps = std::stoi(require_value(key));
     } else if (key == "--map-begin") {
@@ -174,6 +180,10 @@ inline QuadrotorGpuNewConfig parseQuadrotorGpuNewArgs(int argc, char **argv) {
       config.istep = std::stoi(require_value(key));
     } else if (key == "--dataset-dir") {
       config.dataset_dir = require_value(key);
+    } else if (key == "--vis-every") {
+      config.vis_every = std::stoi(require_value(key));
+    } else if (key == "--no-rollouts") {
+      config.save_rollouts = false;
     } else {
       throw std::runtime_error("Unknown option: " + key);
     }
@@ -362,7 +372,8 @@ template <typename Solver>
 QuadrotorGpuNewRun runQuadrotorGpuNewLoop(
     Solver &solver, CollisionChecker &collision_checker,
     const QuadrotorGpuNewConfig &config, const Eigen::VectorXd &target,
-    const char *path_variant, int map, std::ofstream &path_csv) {
+    const char *path_variant, int map, std::ofstream &path_csv,
+    MPPIVisLogger *vis_logger = nullptr) {
   QuadrotorGpuNewRun run;
   run.map = map;
   run.touchdown = Eigen::VectorXd::Constant(6, quadrotorGpuNewQuietNaN());
@@ -372,7 +383,14 @@ QuadrotorGpuNewRun runQuadrotorGpuNewLoop(
   for (int i = 0; i < config.maxiter; ++i) {
     const Eigen::VectorXd x_prev = solver.x_init;
 
+    if (vis_logger) {
+      beginQuadrotorGpuVisStep(*vis_logger, config.save_rollouts,
+                               config.vis_every, i);
+    }
     solver.solve();
+    if (vis_logger) {
+      endQuadrotorGpuVisStep(*vis_logger);
+    }
     solver.move();
 
     const Eigen::VectorXd x_next = solver.x_init;
@@ -466,8 +484,16 @@ inline int runQuadrotorGpuNewOneDirectional(
     solver.init(param);
     solver.setCollisionChecker(&collision_checker);
 
+    MPPIVisLogger vis_logger;
+    initQuadrotorGpuVisLogger(vis_logger, config.save_rollouts, variant_token,
+                              map, model.dim_x, param.T, collision_checker,
+                              param.x_init, param.x_target,
+                              "quadrotor_precision");
+    solver.setVisLogger(&vis_logger);
+
     auto run = runQuadrotorGpuNewLoop(
-        solver, collision_checker, config, target, variant_token, map, path_csv);
+        solver, collision_checker, config, target, variant_token, map, path_csv,
+        &vis_logger);
     std::cout << map << '\t' << run.is_failed << '\t' << run.is_landed
               << '\t' << run.is_precision_landed << '\t' << run.iter << '\t'
               << run.elapsed << std::endl;
@@ -518,8 +544,16 @@ inline int runQuadrotorGpuNewBidirectional(
     solver.setCollisionChecker(&collision_checker);
     solver.dummy_u(2) += model.g;
 
+    MPPIVisLogger vis_logger;
+    initQuadrotorGpuVisLogger(vis_logger, config.save_rollouts, variant_token,
+                              map, model.dim_x, param.Tf + param.Tb,
+                              collision_checker, param.x_init,
+                              param.x_target, "quadrotor_precision");
+    solver.setVisLogger(&vis_logger);
+
     auto run = runQuadrotorGpuNewLoop(
-        solver, collision_checker, config, target, variant_token, map, path_csv);
+        solver, collision_checker, config, target, variant_token, map, path_csv,
+        &vis_logger);
     std::cout << map << '\t' << run.is_failed << '\t' << run.is_landed
               << '\t' << run.is_precision_landed << '\t' << run.iter << '\t'
               << run.elapsed << std::endl;
@@ -570,8 +604,16 @@ inline int runQuadrotorGpuNewSvgd(
     solver.setCollisionChecker(&collision_checker);
     solver.dummy_u(2) += model.g;
 
+    MPPIVisLogger vis_logger;
+    initQuadrotorGpuVisLogger(vis_logger, config.save_rollouts, variant_token,
+                              map, model.dim_x, param.Tf + param.Tb,
+                              collision_checker, param.x_init,
+                              param.x_target, "quadrotor_precision");
+    solver.setVisLogger(&vis_logger);
+
     auto run = runQuadrotorGpuNewLoop(
-        solver, collision_checker, config, target, variant_token, map, path_csv);
+        solver, collision_checker, config, target, variant_token, map, path_csv,
+        &vis_logger);
     std::cout << map << '\t' << run.is_failed << '\t' << run.is_landed
               << '\t' << run.is_precision_landed << '\t' << run.iter << '\t'
               << run.elapsed << std::endl;

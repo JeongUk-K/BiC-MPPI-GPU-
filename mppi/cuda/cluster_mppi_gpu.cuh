@@ -3,7 +3,6 @@
 #include "mppi_gpu.cuh"
 
 #include <deque>
-#include <map>
 #include <numeric>
 
 // ============================================================
@@ -22,7 +21,7 @@ public:
   void solve() override;
 
   void dbscan(std::vector<std::vector<int>> &clusters,
-              const Eigen::MatrixXd &Di, const Eigen::VectorXd &costs,
+              const Eigen::MatrixXd &feature_source, const Eigen::VectorXd &costs,
               int N_samples, int T_steps);
 
   void calculateU(Eigen::MatrixXd &Uout,
