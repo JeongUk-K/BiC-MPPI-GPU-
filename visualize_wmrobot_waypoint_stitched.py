@@ -20,6 +20,8 @@ SOLVERS = [
     ("bi_mppi", "BiC-MPPI (parallel rollout)", "#e45756"),
 ]
 
+PATH_FIGSIZE = (12.0, 4.8)
+
 
 def parse_number(value, default=math.nan):
     try:
@@ -312,7 +314,7 @@ def plot_paths_for_scenario(root, paths, summary, scenario, out_path):
         row["solver"]: row for row in summary if int(row["scenario"]) == scenario
     }
 
-    fig, ax = plt.subplots(figsize=(12.0, 4.2))
+    fig, ax = plt.subplots(figsize=PATH_FIGSIZE)
     add_map(ax, grid)
 
     for solver, label, color in SOLVERS:
@@ -321,14 +323,13 @@ def plot_paths_for_scenario(root, paths, summary, scenario, out_path):
             continue
         row = summary_by_solver.get(solver, {})
         ok = bool(parse_number(row.get("success"), 0.0))
-        elapsed = parse_number(row.get("elapsed"), math.nan)
         px, py = plot_xy(path)
         ax.plot(
             px,
             py,
             color=color,
             linewidth=1.0,
-            label=f"{label} ({'success' if ok else 'fail'}, {elapsed:.2f}s)",
+            label=f"{label} ({'success' if ok else 'fail'})",
             zorder=5,
         )
         ax.scatter(px[-1], py[-1], s=28, color=color, zorder=6)
@@ -352,7 +353,7 @@ def plot_paths_for_scenario(root, paths, summary, scenario, out_path):
     if summary_by_solver:
         map_ids = next(iter(summary_by_solver.values())).get("map_ids", "")
     ax.set_title(f"WMRobot stitched BARN scenario {scenario:02d}  |  maps {map_ids}")
-    ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.06), ncol=2, frameon=False)
+    ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.34), ncol=2, frameon=False)
     fig.tight_layout()
     fig.savefig(out_path, dpi=180)
     plt.close(fig)

@@ -1,0 +1,523 @@
+Manipulator random_pose_benchmark 설명 파일
+작성 기준: BiC-MPPI-legacy 현재 코드의 random_pose_benchmark manipulator 예제
+주요 코드:
+- src/manipulator/manipulator_workspace_collision_package/include/manipulator_dynamics_model.h
+- src/manipulator/manipulator_workspace_collision_package/examples/manipulator_pose_set.h
+- src/manipulator/manipulator_workspace_collision_package/examples/random_pose_benchmark/manipulator_random_pose_benchmark_common.h
+- src/manipulator/manipulator_workspace_collision_package/src/mppi_gpu.cu
+- src/manipulator/manipulator_workspace_collision_package/src/log_mppi_gpu.cu
+- src/manipulator/manipulator_workspace_collision_package/src/cluster_mppi_gpu.cu
+- src/manipulator/manipulator_workspace_collision_package/src/bi_mppi_gpu.cu
+
+목적
+====
+이 예제는 6-DOF manipulator의 random start-goal pose planning benchmark이다. 고정된 16개 joint posture 집합에서 무작위로 시작/목표 pose pair를 뽑고, 두 end-effector 위치의 중간에 workspace AABB 장애물을 배치한다. 같은 시나리오에 대해 MPPI, Log-MPPI, Cluster-MPPI, BiC-MPPI를 실행하여 성공률, 반복 횟수, 계산 시간, 최종 오차, 충돌 여부를 비교한다.
+
+논문에 사용할 때의 핵심 메시지
+===============================
+이 실험은 실제 하드웨어 동역학 검증이 아니라, obstacle-aware torque-level sampling MPC 계열 solver의 비교를 위한 simulation benchmark이다. manipulator model은 완전한 rigid-body inverse dynamics가 아니라 joint-wise decoupled second-order dynamics를 사용한다. 따라서 논문에서는 "RB5-like DH kinematics with simplified decoupled joint-space dynamics" 또는 "simulation benchmark"라고 표현하는 것이 안전하다.
+
+
+1. Manipulator 동역학 파라미터 및 식
+====================================
+
+상태와 입력
+-----------
+상태:
+  x = [q; qdot] in R^12
+
+입력:
+  u = tau in R^6
+
+여기서 q는 6개 joint angle [rad], qdot은 joint velocity [rad/s], tau는 joint torque 또는 torque-like command이다.
+
+연속 시간 동역학
+----------------
+각 joint는 서로 decoupled된 2차 동역학으로 모델링된다.
+
+  qdot_i = v_i
+
+  vdot_i = (tau_i_sat - d_i v_i - g_i sin(q_i)) / I_i
+
+  tau_i_sat = clamp(tau_i, -tau_max_i, tau_max_i)
+
+이 모델은 full rigid-body manipulator dynamics,
+
+  M(q) qddot + C(q, qdot) qdot + G(q) = tau
+
+를 직접 사용하지 않는다. 대신 stable torque-level benchmark를 위해 관성, 점성 damping, 단순 gravity sinusoidal term을 joint별로 둔 모델이다.
+
+수치 적분
+---------
+Benchmark에서 실제 executed trajectory를 한 step 진행할 때는 CPU model의 RK4 적분을 사용한다.
+
+  x_{k+1} = RK4(x_k, u_k, dt)
+
+GPU rollout 내부에서는 explicit Euler 형태,
+
+  x_{k+1} = x_k + dt f(x_k, u_k)
+
+를 사용한다. 즉 planning rollout과 executed simulation 사이에 적분 방식 차이가 있다. 논문에서는 "GPU rollout uses Euler integration while the executed closed-loop state is advanced with RK4"라고 명시하면 좋다.
+
+시간 간격
+---------
+모든 solver:
+  dt = 0.02 s
+
+Manipulator joint/torque 파라미터
+---------------------------------
+Joint limits:
+  q_min = [-2pi, -2pi, -165deg, -2pi, -2pi, -2pi]
+  q_max = [ 2pi,  2pi,  165deg,  2pi,  2pi,  2pi]
+
+Velocity limits:
+  qdot_max = [2.0, 2.0, 2.0, 2.5, 2.5, 2.5] rad/s
+
+Torque limits:
+  tau_max = [18.0, 18.0, 14.0, 8.0, 6.0, 4.0]
+
+Decoupled dynamics parameters:
+  inertia     = [4.0, 3.5, 2.5, 0.9, 0.6, 0.35]
+  damping     = [3.5, 3.2, 2.5, 0.8, 0.5, 0.35]
+  gravity_amp = [0.0, 7.0, 4.5, 0.6, 0.3, 0.15]
+
+Forward kinematics
+------------------
+DH convention:
+
+  A_i(q_i) =
+    [ cos(q_i), -sin(q_i) cos(alpha_i),  sin(q_i) sin(alpha_i), a_i cos(q_i) ]
+    [ sin(q_i),  cos(q_i) cos(alpha_i), -cos(q_i) sin(alpha_i), a_i sin(q_i) ]
+    [        0,              sin(alpha_i),              cos(alpha_i), d_i     ]
+    [        0,                         0,                         0, 1       ]
+
+Global transform:
+  T_i = A_1 A_2 ... A_i
+
+Joint/link points are the origins of these transforms plus the base origin.
+
+DH parameters:
+  a     = [0.0, -0.427, -0.357, 0.0, 0.0, 0.0] m
+  d     = [0.15, 0.0, 0.0, 0.11, 0.09, 0.09] m
+  alpha = [pi/2, 0.0, 0.0, pi/2, -pi/2, 0.0] rad
+
+End-effector position:
+  p_ee(q) = translation part of T_6
+
+Cost function
+-------------
+Stage cost:
+
+  l(x, u) =
+      w_tau ||tau||^2
+    + w_qdot ||qdot||^2
+    + jointLimitPenalty(q)
+    + workspaceObstaclePenalty(x)
+
+Weights:
+  w_tau = 1.0e-3
+  w_qdot = 2.0e-2
+  w_joint_limit = 20.0
+  w_workspace_obs = 2.0e3
+  w_ground = 2.0e4
+
+Joint limit penalty:
+  center_i = (q_max_i + q_min_i) / 2
+  half_range_i = (q_max_i - q_min_i) / 2
+  normalized_i = (q_i - center_i) / (0.85 half_range_i)
+  excess_i = |normalized_i| - 1
+  penalty = sum_i w_joint_limit max(excess_i, 0)^2
+
+Terminal cost:
+
+  phi(x, x_goal) =
+      w_terminal_q ||q - q_goal||^2
+    + w_terminal_ee ||p_ee(q) - p_ee(q_goal)||^2
+    + w_terminal_qdot ||qdot||^2
+
+Weights:
+  w_terminal_q = 1.5e3
+  w_terminal_ee = 5.0e2
+  w_terminal_qdot = 1.0e2
+
+
+2. Solver 파라미터
+=================
+
+공통 sampling 파라미터
+----------------------
+Noise standard deviation for torque samples:
+  sigma = [4.5, 4.5, 3.8, 2.2, 1.8, 1.2]
+
+MPPI exponential inverse-temperature:
+  gamma_u = 0.0015
+
+Warm-start PD gains:
+  kp = 18.0
+  kd = 7.0
+
+MPPI / Log-MPPI / Cluster-MPPI
+------------------------------
+Forward horizon:
+  T = 90
+
+Samples:
+  N = 1024
+
+Nominal sampled control sequence:
+  U_i = U_0 + sigma * epsilon_i
+  epsilon_i ~ N(0, I)
+
+Cost-normalized MPPI weight:
+  w_i = exp(-gamma_u (J_i - J_min)) / sum_j exp(-gamma_u (J_j - J_min))
+
+Output control sequence:
+  U_out = sum_i w_i U_i
+
+At each MPC iteration, the first torque command u0 = U_out[:,0] is applied, then the control sequence is shifted for the next iteration.
+
+Log-MPPI uses the same Gaussian rollout distribution as MPPI. Its only
+algorithmic difference from MPPI in this benchmark is that the exponential
+trajectory weights are evaluated with log-sum-exp normalization:
+
+  log_w_i = -gamma_u J_i
+  log_Z = log sum_j exp(log_w_j)
+  w_i = exp(log_w_i - log_Z)
+
+Collision-penalized samples with J_i >= 1e8 are assigned zero weight. If all
+samples are collision-penalized, the solver falls back to the least-cost sampled
+control sequence.
+
+Cluster-MPPI specific parameters:
+  cluster_deviation_mu = 1.0
+  cluster_epsilon = 3.8
+  cluster_minpts = 8
+
+Cluster-MPPI procedure:
+  1. Generate N sampled control sequences and rollout costs.
+  2. Build a low-dimensional feature from each control sequence by dividing the horizon into 3 blocks and averaging each joint command in each block.
+  3. Run DBSCAN on valid samples, excluding collision-penalized samples with cost around 1e8.
+  4. For each cluster, compute a weighted MPPI average control sequence using the same exponential weighting.
+  5. Roll out each cluster-level candidate and choose the one with the lowest cost and no collision.
+
+BiC-MPPI
+--------
+Forward horizon:
+  Tf = 45
+
+Backward horizon:
+  Tb = 45
+
+Samples:
+  Nf = 1024
+  Nb = 1024
+  Nr = 1024
+
+Total samples per MPC iteration:
+  N_total = Nf + Nb + Nr = 3072
+
+BiC-specific clustering/connection parameters:
+  bic_deviation_mu = 1.0
+  bic_cost_mu = 1.0
+  bic_epsilon = 3.8
+  bic_minpts = 8
+  bic_psi = 0.0
+
+BiC-MPPI procedure:
+  1. Run backward rollout from the target-side nominal sequence.
+  2. Run forward rollout from the current state-side nominal sequence.
+  3. Cluster forward and backward sampled control sequences using DBSCAN.
+  4. Convert each cluster into a representative control sequence using cost-weighted averaging.
+  5. Roll out forward cluster trajectories Xf and backward cluster trajectories Xb.
+  6. For each forward cluster, find the closest point in all backward cluster trajectories.
+  7. Concatenate the forward and backward partial trajectory/control sequences at the closest connection.
+  8. Run guide MPPI with Nr samples around each concatenated reference.
+  9. Select the lowest-cost feasible guided trajectory. If guide MPPI fails but a concatenated reference is feasible, use the best feasible reference.
+
+The benchmark records BiC-MPPI's mean connection distance in the stats CSV.
+
+
+3. 장애물 위치 및 충돌 모델
+===========================
+
+장애물 형태
+-----------
+Each scenario has one axis-aligned bounding box (AABB) obstacle in the manipulator base frame:
+
+  obstacle = [xmin, xmax] x [ymin, ymax] x [zmin, zmax]
+
+Obstacle generation formula:
+  c = 0.5 * (p_ee(x_init) + p_ee(x_goal))
+  xmin = c_x - obstacle_half_x
+  xmax = c_x + obstacle_half_x
+  ymin = c_y - obstacle_half_y
+  ymax = c_y + obstacle_half_y
+  zmin = max(obstacle_min_z, c_z - obstacle_half_z)
+  zmax = max(zmin + 0.02, c_z + obstacle_half_z)
+
+Obstacle half-size parameters:
+  obstacle_half_x = 0.035 m
+  obstacle_half_y = 0.035 m
+  obstacle_half_z = 0.055 m
+  obstacle_min_z = 0.05 m
+
+Collision geometry:
+  link_radius = 0.045 m
+  obs_safe_margin = 0.10 m
+  hard_collision_margin = 0.02 m
+
+Collision condition:
+  sd = signedDistance(point, AABB) - link_radius
+  collision if sd < hard_collision_margin
+
+The CPU model checks link endpoints and midpoints. The GPU collision checker samples 5 points per link segment. In both cases, z < 0 is treated as collision or ground violation.
+
+Workspace obstacle penalty:
+  if sd < 0:
+    cost += 1e5 + 1e5 sd^2
+  else if sd < obs_safe_margin:
+    e = (obs_safe_margin - sd) / obs_safe_margin
+    cost += w_workspace_obs e^2
+
+GPU rollout obstacle penalty uses a stronger hard-penalty style:
+  if sd < hard_margin: cost += 1e6
+  else if sd < safe_margin: cost += 1e4 e^2
+
+240개 전수 시나리오의 장애물 위치
+--------------------------------
+The benchmark now evaluates every ordered start-goal pair from the fixed 16-pose set:
+
+  scenario_count = 16 * 15 = 240
+  scenario order = for init_idx in [0,15], for goal_idx in [0,15], init_idx != goal_idx
+  rollout_seed   = rollout_seed_base + scenario_index
+  rollout_seed_base = 260800
+
+For each ordered pair, one AABB obstacle is placed at the midpoint of the start and goal end-effector positions:
+
+  center = 0.5 * (p_ee_init + p_ee_goal)
+  xmin = center.x - obstacle_half_x
+  xmax = center.x + obstacle_half_x
+  ymin = center.y - obstacle_half_y
+  ymax = center.y + obstacle_half_y
+  zmin = max(obstacle_min_z, center.z - obstacle_half_z)
+  zmax = max(zmin + 0.02, center.z + obstacle_half_z)
+
+The full 240-row obstacle table is written to:
+
+  random_pose_benchmark/results/manipulator_random_pose_benchmark_scenarios.csv
+
+The direct_path_blocked column is computed by checking 24-segment joint-space linear interpolation between q_init and q_goal against the generated workspace obstacle.
+
+
+4. Benchmark 방법
+=================
+
+Reference pose set
+------------------
+The benchmark uses a fixed set of 16 joint-space postures. Each posture has qdot = 0 when converted to a full state.
+
+pose_id  name              q [rad]
+0        home_mid          [ 0.05, -1.15, 1.25,  0.00, 0.85,  0.00]
+1        detour_high       [ 1.20, -1.40, 0.50, -0.20, 0.70,  0.10]
+2        goal_right        [ 1.45, -0.80, 1.05, -0.20, 0.65,  0.25]
+3        pre_pick          [-0.65, -1.18, 1.22,  0.00, 0.78,  0.00]
+4        pick_low          [-0.65, -0.82, 1.52,  0.00, 0.38,  0.00]
+5        transfer_high     [ 0.10, -1.45, 1.25,  0.00, 1.05,  0.00]
+6        pre_place         [ 0.90, -1.18, 1.18,  0.00, 0.80,  0.00]
+7        place_low         [ 0.90, -0.78, 1.52,  0.00, 0.36,  0.00]
+8        left_high         [-0.90, -1.25, 1.10,  0.15, 0.95,  0.05]
+9        left_low          [-0.90, -0.90, 1.45,  0.10, 0.45,  0.05]
+10       right_high        [ 1.10, -1.25, 1.10, -0.15, 0.95, -0.05]
+11       right_low         [ 1.10, -0.90, 1.45, -0.10, 0.45, -0.05]
+12       over_left         [-0.35, -1.55, 1.35,  0.10, 1.10,  0.00]
+13       over_right        [ 0.35, -1.55, 1.35, -0.10, 1.10,  0.00]
+14       front_left_mid    [-0.45, -0.95, 1.30,  0.10, 0.65,  0.10]
+15       front_right_mid   [ 0.45, -0.95, 1.30, -0.10, 0.65, -0.10]
+
+Scenario generation
+-------------------
+1. Enumerate all ordered pairs from the 16-pose set.
+2. Skip only the trivial self-pair where init_idx == goal_idx.
+3. Convert both postures to states x = [q; 0].
+4. Place one AABB obstacle at the midpoint of the initial and goal end-effector positions.
+5. Keep the scenario even if it is short, long, easy, difficult, or starts near the generated obstacle. This makes the benchmark a complete 16-by-15 directed-pair sweep rather than a filtered random subset.
+
+Active scenario generation parameters:
+  scenario_count = 240
+  rollout_seed_base = 260800
+  max_pair_q_distance = infinity
+  min_pair_ee_distance = 0.0 m
+
+Closed-loop execution
+---------------------
+For each scenario and solver:
+1. Initialize solver with the scenario start state and goal state.
+2. Build a warm-start control sequence using PD torque control toward a waypoint and then toward the goal.
+3. At each MPC iteration:
+   a. Run solver.solve().
+   b. Record solver elapsed time.
+   c. Check whether current state satisfies the success thresholds.
+   d. If not reached, apply the first control u0.
+   e. Advance the executed state by RK4 with dt = 0.02.
+   f. Shift the solver's nominal control sequence.
+4. Stop when success thresholds are met or max_iter is reached.
+
+Waypoint warm-start
+-------------------
+The waypoint is selected from candidate pose IDs:
+  [1, 5, 12, 13, 10, 8, 6, 3]
+
+The selected waypoint:
+  - must not be the init or goal pose,
+  - must not be in collision,
+  - minimizes workspaceObstaclePenalty among candidates.
+
+PD warm-start law:
+  tau = kp (q_ref - q) - kd qdot
+  tau is clipped by tau_max.
+
+Termination and success
+-----------------------
+Current active thresholds:
+  max_iter = 200
+  q_tol = 0.03 rad
+  ee_tol = 0.05 m
+  qdot_tol = 0.2 rad/s
+
+Reached condition:
+  ||q - q_goal|| < q_tol
+  ||p_ee(q) - p_ee(q_goal)|| < ee_tol
+  ||qdot|| < qdot_tol
+
+Success condition:
+  reached == true and collision_count == 0
+
+Collision_count is computed over the executed trajectory.
+
+Metrics written to CSV
+----------------------
+Per-solver stats CSV columns include:
+  solver
+  solver_label
+  scenario
+  rollout_seed
+  init_idx, goal_idx
+  init_name, goal_name
+  obstacle bounds
+  reached
+  success
+  solve_iterations
+  executed_steps
+  max_iter
+  total_solver_elapsed_s
+  mean_solver_elapsed_s
+  wall_elapsed_s
+  final_q_error
+  final_ee_error
+  final_qdot_norm
+  collision_count
+  connection_distance
+  horizon
+  samples_per_branch
+  samples_total_per_iter
+  trajectory_csv
+
+Output files
+------------
+Running:
+  ./manipulator_rsndom.sh
+
+creates:
+  random_pose_benchmark/results/manipulator_random_pose_benchmark_scenarios.csv
+  random_pose_benchmark/results/manipulator_random_pose_benchmark_mppi_stats.csv
+  random_pose_benchmark/results/manipulator_random_pose_benchmark_logmppi_stats.csv
+  random_pose_benchmark/results/manipulator_random_pose_benchmark_clustermppi_stats.csv
+  random_pose_benchmark/results/manipulator_random_pose_benchmark_bicmppi_stats.csv
+  random_pose_benchmark/results/manipulator_random_pose_benchmark_final_stats.csv
+  random_pose_benchmark/results/manipulator_random_pose_benchmark_failure_breakdown.csv
+  random_pose_benchmark/results/trajectories/<solver>/scenario_XX_executed_x.csv
+  random_pose_benchmark/results/gifs/<solver>/scenario_XX_<solver>.gif
+
+Current aggregate result snapshot
+---------------------------------
+After rerunning the examples, the current aggregate summary is written to:
+
+  random_pose_benchmark/results/manipulator_random_pose_benchmark_final_stats.csv
+
+In the final aggregate CSV, the primary mean_* columns are computed only over successful scenarios. If a solver has no successful scenarios, these success-conditioned mean fields are intentionally left blank. The all_mean_* columns keep whole-benchmark averages for continuous failure analysis.
+
+Current 240-scenario aggregate snapshot:
+
+solver        scenarios  strict_success  success_rate  EE+vel  collision_free  near_ee<0.05  mean_wall_success_s  all_mean_wall_s
+MPPI          240        50              0.2083        91      170             142            3.8212               5.0544
+Log-MPPI      240        0               0.0000        5       179             109            N/A                  5.4672
+Cluster-MPPI  240        54              0.2250        92      173             145            5.6174               7.3080
+BiC-MPPI      240        96              0.4000        127     176             131            4.5545               6.4986
+
+Important interpretation:
+  - With the full 240 directed-pair sweep, success_count is a broader benchmark statistic than the previous 9-scenario random subset.
+  - The current q/EE/qdot thresholds are strict enough that success_count may hide useful near-goal behavior.
+  - BiC-MPPI has a higher per-iteration sample budget, 3072 total samples, because it uses forward, backward, and guide sampling.
+  - For a fair compute-budget comparison, one should additionally run a same-total-sample baseline or report this as a richer BiC sampling budget.
+
+Metric decomposition and failure-mode report
+--------------------------------------------
+Binary success alone is too coarse for this benchmark. The current run should be reported with separated metrics:
+
+metric               definition
+goal_reached_strict  q error < q_tol, EE error < ee_tol, qdot norm < qdot_tol
+goal_reached_ee      EE error < ee_tol and qdot norm < qdot_tol
+collision_free       executed trajectory collision_count = 0
+near_goal_ee05       final EE error < 0.05 m
+near_goal_ee07       final EE error < 0.07 m
+final_error          continuous final q error, EE error, and qdot norm
+
+Current active CSV thresholds are:
+  q_tol = 0.03 rad
+  ee_tol = 0.05 m
+  qdot_tol = 0.2 rad/s
+
+Note: if q_tol is tightened to 0.02 rad, the strict success metric should be recomputed from fresh CSVs or from final_q_error. The current CSVs were generated with q_tol = 0.03.
+
+Scenario-level failure flags:
+  flag q   = final_q_error >= q_tol
+  flag ee  = final_ee_error >= ee_tol
+  flag vel = final_qdot_norm >= qdot_tol
+  flag col = collision_count > 0
+
+The full scenario-level failure table is written to:
+
+  random_pose_benchmark/results/manipulator_random_pose_benchmark_failure_breakdown.csv
+
+
+5. 논문 보조 실험으로 사용할 때의 GPT 입력 가이드
+=================================================
+
+Recommended experiment description
+----------------------------------
+"We evaluate the methods on a 6-DOF manipulator random-pose benchmark with RB5-like DH kinematics and simplified decoupled joint-space second-order dynamics. The benchmark enumerates all 240 ordered start-goal tasks from a fixed 16-pose set, places an axis-aligned workspace obstacle at the midpoint between the start and goal end-effector positions, and runs the same directed-pair sweep for every solver. We compare MPPI, Log-MPPI, Cluster-MPPI, and BiC-MPPI in a closed-loop MPC setting. At each iteration, the solver samples torque sequences, applies the first torque command, and advances the state with RK4 integration. A trial is considered successful if the final joint error, end-effector error, and velocity norm are below fixed thresholds and the executed trajectory remains collision-free."
+
+Recommended claims
+------------------
+Safe claims:
+  - This benchmark tests obstacle-aware closed-loop sampling MPC behavior.
+  - The same generated start/goal/obstacle scenarios are shared across solvers.
+  - BiC-MPPI explicitly explores forward and backward branches and refines concatenated connections using guide MPPI.
+  - Cluster-based variants use DBSCAN in control-sequence feature space to preserve multiple candidate modes.
+
+Claims to avoid unless additional experiments are run:
+  - Do not claim hardware-level validity.
+  - Do not claim full rigid-body dynamics accuracy.
+  - Do not claim equal compute budget between BiC-MPPI and forward-only MPPI unless sample counts or runtime are normalized.
+  - Do not claim broad real-world generalization from the 16-pose synthetic benchmark alone.
+
+Suggested additional paper experiments
+--------------------------------------
+For a stronger paper-level backing experiment:
+  1. Add additional independently designed pose sets or randomized pose sets.
+  2. Run obstacle-size and obstacle-placement ablations.
+  3. Report both success rate and collision-free rate.
+  4. Report runtime normalized by sample count or GPU wall time.
+  5. Add a same-budget comparison, e.g. MPPI with N = 3072 vs BiC-MPPI with Nf+Nb+Nr = 3072.
+  6. Report median and interquartile range, not only mean.
+  7. Keep the simplified dynamics caveat explicit.

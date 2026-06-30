@@ -1,0 +1,36 @@
+# Add this fragment to your existing BiC-MPPI CMakeLists.txt.
+# Adjust include directories and CUDA target names if your repository already
+# defines a shared bic_mppi_gpu library.
+
+find_package(Eigen3 REQUIRED)
+find_package(OpenMP REQUIRED)
+
+add_executable(manipulator_bicmppi_workspace_example
+    examples/manipulator_bicmppi_workspace_example.cpp
+    src/bi_mppi_gpu.cu
+)
+
+target_include_directories(manipulator_bicmppi_workspace_example PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${EIGEN3_INCLUDE_DIR}
+)
+
+target_link_libraries(manipulator_bicmppi_workspace_example PRIVATE
+    curand
+    OpenMP::OpenMP_CXX
+)
+
+add_executable(manipulator_bicmppi_pick_place_workspace_example
+    examples/manipulator_bicmppi_pick_place_workspace_example.cpp
+    src/bi_mppi_gpu.cu
+)
+
+target_include_directories(manipulator_bicmppi_pick_place_workspace_example PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${EIGEN3_INCLUDE_DIR}
+)
+
+target_link_libraries(manipulator_bicmppi_pick_place_workspace_example PRIVATE
+    curand
+    OpenMP::OpenMP_CXX
+)

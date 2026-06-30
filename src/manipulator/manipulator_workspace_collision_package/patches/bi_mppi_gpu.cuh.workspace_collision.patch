@@ -1,0 +1,29 @@
+--- /mnt/data/bi_mppi_gpu(2).cuh	2026-06-23 06:18:46.746114889 +0000
++++ /mnt/data/manipulator_workspace_collision_package/include/bi_mppi_gpu.cuh	2026-06-23 07:04:53.695201233 +0000
+@@ -89,9 +89,10 @@
+   double *d_x_init, *d_x_target, *d_sigma;
+ 
+   // Collision
+-  double *d_map, *d_circles, *d_rects;
+-  int map_max_row, map_max_col, n_circles, n_rects;
++  double *d_map, *d_circles, *d_rects, *d_ws_boxes;
++  int map_max_row, map_max_col, n_circles, n_rects, n_ws_boxes;
+   double map_resolution;
++  double ws_link_radius, ws_safe_margin, ws_hard_margin;
+   bool with_map;
+   curandGenerator_t curand_gen;
+ 
+@@ -150,8 +151,11 @@
+   d_Ub0 = d_Ubi = d_noise_b = d_costs_b = d_Ub_out = d_Di_b = nullptr;
+   d_Ur0 = d_Uri = d_noise_r = d_costs_r = d_Ur_out = d_Xref = nullptr;
+   d_x_init = d_x_target = d_sigma = nullptr;
+-  d_map = d_circles = d_rects = nullptr;
+-  n_circles = n_rects = 0;
++  d_map = d_circles = d_rects = d_ws_boxes = nullptr;
++  n_circles = n_rects = n_ws_boxes = 0;
++  ws_link_radius = 0.045;
++  ws_safe_margin = 0.10;
++  ws_hard_margin = 0.0;
+   with_map = false;
+   alloc_Nf = alloc_Nb = alloc_Tf = alloc_Tb = 0;
+   alloc_Tr_guide = 0;

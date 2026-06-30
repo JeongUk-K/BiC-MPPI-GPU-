@@ -7,6 +7,9 @@
 #
 # 사용법:
 #   bash build_gpu.sh             # manipulator GPU 예제 빌드
+#   bash build_gpu.sh manipulator_workspace_collision  # workspace link-collision manipulator BiC-MPPI 예제 빌드
+#   bash build_gpu.sh manipulator_grid_wall_workspace_example  # grid-wall manipulator BiC-MPPI 예제 빌드
+#   bash build_gpu.sh manipulator_grid_approach_workspace_example  # grid-approach manipulator BiC-MPPI 예제 빌드
 #   bash build_gpu.sh quadrotor   # quadrotor GPU 예제 빌드
 #   bash build_gpu.sh quadrotor_log_mppi  # quadrotor Log-MPPI GPU 예제만 빌드
 #   bash build_gpu.sh quadrotor_gpu_new  # quadrotor precision-landing GPU 예제 빌드
@@ -29,6 +32,14 @@ BUILD_ROOT="$SCRIPT_DIR/build"
 GPU_BUILD_DIR="$BUILD_ROOT/gpu"
 TARGET_GROUP="${1:-manipulator}"
 BUILD_PREFIX=""
+BUILD_COMMON_GPU_LIB=1
+
+if [ "$TARGET_GROUP" = "manipulator_workspace_collision" ] || \
+   [ "$TARGET_GROUP" = "manipulator_bicmppi_workspace_example" ] || \
+   [ "$TARGET_GROUP" = "manipulator_grid_wall_workspace_example" ] || \
+   [ "$TARGET_GROUP" = "manipulator_grid_approach_workspace_example" ]; then
+    BUILD_COMMON_GPU_LIB=0
+fi
 
 NVCC=""
 CUDA_INCLUDE=""
@@ -155,33 +166,37 @@ if [ "$TARGET_GROUP" = "wmrobot_waypoint_stitched" ] || \
 fi
 
 # ── GPU solver 오브젝트 파일 컴파일 ──────────────────────────────
-echo "[1/?] Compiling mppi_gpu.cu ..."
-$NVCC $NVCCFLAGS $INCLUDES -c mppi/cuda/mppi_gpu.cu -o "$GPU_BUILD_DIR/mppi_gpu.o"
+if [ "$BUILD_COMMON_GPU_LIB" -eq 1 ]; then
+    echo "[1/?] Compiling mppi_gpu.cu ..."
+    $NVCC $NVCCFLAGS $INCLUDES -c mppi/cuda/mppi_gpu.cu -o "$GPU_BUILD_DIR/mppi_gpu.o"
 
-echo "[2/?] Compiling cluster_mppi_gpu.cu ..."
-$NVCC $NVCCFLAGS $INCLUDES -c mppi/cuda/cluster_mppi_gpu.cu -o "$GPU_BUILD_DIR/cluster_mppi_gpu.o"
+    echo "[2/?] Compiling cluster_mppi_gpu.cu ..."
+    $NVCC $NVCCFLAGS $INCLUDES -c mppi/cuda/cluster_mppi_gpu.cu -o "$GPU_BUILD_DIR/cluster_mppi_gpu.o"
 
-echo "[3/?] Compiling bi_mppi_gpu.cu ..."
-$NVCC $NVCCFLAGS $INCLUDES -c mppi/cuda/bi_mppi_gpu.cu -o "$GPU_BUILD_DIR/bi_mppi_gpu.o"
+    echo "[3/?] Compiling bi_mppi_gpu.cu ..."
+    $NVCC $NVCCFLAGS $INCLUDES -c mppi/cuda/bi_mppi_gpu.cu -o "$GPU_BUILD_DIR/bi_mppi_gpu.o"
 
-GPU_OBJS=("$GPU_BUILD_DIR/mppi_gpu.o" "$GPU_BUILD_DIR/cluster_mppi_gpu.o" "$GPU_BUILD_DIR/bi_mppi_gpu.o")
+    GPU_OBJS=("$GPU_BUILD_DIR/mppi_gpu.o" "$GPU_BUILD_DIR/cluster_mppi_gpu.o" "$GPU_BUILD_DIR/bi_mppi_gpu.o")
 
-if [ "$BUILD_SVGD_OBJ" -eq 1 ]; then
-    echo "[4/?] Compiling svgd_mppi_gpu.cu ..."
-    $NVCC $NVCCFLAGS $INCLUDES -c mppi/cuda/svgd_mppi_gpu.cu -o "$GPU_BUILD_DIR/svgd_mppi_gpu.o"
-    GPU_OBJS+=("$GPU_BUILD_DIR/svgd_mppi_gpu.o")
+    if [ "$BUILD_SVGD_OBJ" -eq 1 ]; then
+        echo "[4/?] Compiling svgd_mppi_gpu.cu ..."
+        $NVCC $NVCCFLAGS $INCLUDES -c mppi/cuda/svgd_mppi_gpu.cu -o "$GPU_BUILD_DIR/svgd_mppi_gpu.o"
+        GPU_OBJS+=("$GPU_BUILD_DIR/svgd_mppi_gpu.o")
+    else
+        echo "[4/?] Skipping svgd_mppi_gpu.cu for $TARGET_GROUP"
+    fi
+
+    echo "[5/?] Compiling log_mppi_gpu.cu ..."
+    $NVCC $NVCCFLAGS $INCLUDES -c mppi/cuda/log_mppi_gpu.cu -o "$GPU_BUILD_DIR/log_mppi_gpu.o"
+    GPU_OBJS+=("$GPU_BUILD_DIR/log_mppi_gpu.o")
+
+    # GPU 오브젝트들을 ar로 정적 라이브러리로 묶기
+    rm -f "$GPU_BUILD_DIR/libmppi_gpu.a"
+    ar rcs "$GPU_BUILD_DIR/libmppi_gpu.a" "${GPU_OBJS[@]}"
+    echo "  → build/gpu/libmppi_gpu.a 생성 완료"
 else
-    echo "[4/?] Skipping svgd_mppi_gpu.cu for $TARGET_GROUP"
+    echo "[1/?] Skipping shared GPU solver library for $TARGET_GROUP"
 fi
-
-echo "[5/?] Compiling log_mppi_gpu.cu ..."
-$NVCC $NVCCFLAGS $INCLUDES -c mppi/cuda/log_mppi_gpu.cu -o "$GPU_BUILD_DIR/log_mppi_gpu.o"
-GPU_OBJS+=("$GPU_BUILD_DIR/log_mppi_gpu.o")
-
-# GPU 오브젝트들을 ar로 정적 라이브러리로 묶기
-rm -f "$GPU_BUILD_DIR/libmppi_gpu.a"
-ar rcs "$GPU_BUILD_DIR/libmppi_gpu.a" "${GPU_OBJS[@]}"
-echo "  → build/gpu/libmppi_gpu.a 생성 완료"
 
 # ── 실행 파일 링크 ────────────────────────────────────────────────
 build_target() {
@@ -208,6 +223,139 @@ build_target_named() {
     echo "  → build/gpu/$NAME 완료"
 }
 
+build_manipulator_workspace_collision_target() {
+    local PKG_DIR="src/manipulator/manipulator_workspace_collision_package"
+    local MPPI_OBJ="$GPU_BUILD_DIR/manipulator_workspace_mppi_gpu.o"
+    local LOG_OBJ="$GPU_BUILD_DIR/manipulator_workspace_log_mppi_gpu.o"
+    local CLUSTER_OBJ="$GPU_BUILD_DIR/manipulator_workspace_cluster_mppi_gpu.o"
+    local OBJ="$GPU_BUILD_DIR/manipulator_workspace_bi_mppi_gpu.o"
+    local WS_INCLUDES="-I./$PKG_DIR/include -I./$PKG_DIR/examples -I./$PKG_DIR/examples/random_pose_benchmark -I./$PKG_DIR/examples/grid_wall $INCLUDES"
+
+    echo "[workspace] Compiling manipulator workspace MPPI CUDA source ..."
+    $NVCC $NVCCFLAGS $WS_INCLUDES -c "$PKG_DIR/src/mppi_gpu.cu" -o "$MPPI_OBJ"
+
+    echo "[workspace] Compiling manipulator workspace Log-MPPI CUDA source ..."
+    $NVCC $NVCCFLAGS $WS_INCLUDES -c "$PKG_DIR/src/log_mppi_gpu.cu" -o "$LOG_OBJ"
+
+    echo "[workspace] Compiling manipulator workspace Cluster-MPPI CUDA source ..."
+    $NVCC $NVCCFLAGS $WS_INCLUDES -c "$PKG_DIR/src/cluster_mppi_gpu.cu" -o "$CLUSTER_OBJ"
+
+    echo "[workspace] Compiling manipulator workspace BiC-MPPI CUDA source ..."
+    $NVCC $NVCCFLAGS $WS_INCLUDES -c "$PKG_DIR/src/bi_mppi_gpu.cu" -o "$OBJ"
+
+    echo "[workspace] Building manipulator_mppi_workspace_example ..."
+    $CXX $CXXFLAGS $WS_INCLUDES "$PKG_DIR/examples/manipulator_mppi_workspace_example.cpp" "$MPPI_OBJ" \
+        -Wl,-rpath,$(dirname ${CUDART_LIB:-/dev/null}) \
+        $LDFLAGS \
+        -o "$GPU_BUILD_DIR/manipulator_mppi_workspace_example"
+    echo "  → build/gpu/manipulator_mppi_workspace_example 완료"
+
+    echo "[workspace] Building manipulator_logmppi_workspace_example ..."
+    $CXX $CXXFLAGS $WS_INCLUDES "$PKG_DIR/examples/manipulator_logmppi_workspace_example.cpp" "$MPPI_OBJ" "$LOG_OBJ" \
+        -Wl,-rpath,$(dirname ${CUDART_LIB:-/dev/null}) \
+        $LDFLAGS \
+        -o "$GPU_BUILD_DIR/manipulator_logmppi_workspace_example"
+    echo "  → build/gpu/manipulator_logmppi_workspace_example 완료"
+
+    echo "[workspace] Building manipulator_clustermppi_workspace_example ..."
+    $CXX $CXXFLAGS $WS_INCLUDES "$PKG_DIR/examples/manipulator_clustermppi_workspace_example.cpp" "$MPPI_OBJ" "$CLUSTER_OBJ" \
+        -Wl,-rpath,$(dirname ${CUDART_LIB:-/dev/null}) \
+        $LDFLAGS \
+        -o "$GPU_BUILD_DIR/manipulator_clustermppi_workspace_example"
+    echo "  → build/gpu/manipulator_clustermppi_workspace_example 완료"
+
+    echo "[workspace] Building manipulator_bicmppi_workspace_example ..."
+    $CXX $CXXFLAGS $WS_INCLUDES "$PKG_DIR/examples/manipulator_bicmppi_workspace_example.cpp" "$OBJ" \
+        -Wl,-rpath,$(dirname ${CUDART_LIB:-/dev/null}) \
+        $LDFLAGS \
+        -o "$GPU_BUILD_DIR/manipulator_bicmppi_workspace_example"
+    echo "  → build/gpu/manipulator_bicmppi_workspace_example 완료"
+
+    echo "[workspace] Building manipulator_mppi_pinkNplace_workspace_example ..."
+    $CXX $CXXFLAGS $WS_INCLUDES "$PKG_DIR/examples/pinkNplace/manipulator_mppi_pinkNplace_workspace_example.cpp" "$MPPI_OBJ" \
+        -Wl,-rpath,$(dirname ${CUDART_LIB:-/dev/null}) \
+        $LDFLAGS \
+        -o "$GPU_BUILD_DIR/manipulator_mppi_pinkNplace_workspace_example"
+    echo "  → build/gpu/manipulator_mppi_pinkNplace_workspace_example 완료"
+
+    echo "[workspace] Building manipulator_logmppi_pinkNplace_workspace_example ..."
+    $CXX $CXXFLAGS $WS_INCLUDES "$PKG_DIR/examples/pinkNplace/manipulator_logmppi_pinkNplace_workspace_example.cpp" "$MPPI_OBJ" "$LOG_OBJ" \
+        -Wl,-rpath,$(dirname ${CUDART_LIB:-/dev/null}) \
+        $LDFLAGS \
+        -o "$GPU_BUILD_DIR/manipulator_logmppi_pinkNplace_workspace_example"
+    echo "  → build/gpu/manipulator_logmppi_pinkNplace_workspace_example 완료"
+
+    echo "[workspace] Building manipulator_clustermppi_pinkNplace_workspace_example ..."
+    $CXX $CXXFLAGS $WS_INCLUDES "$PKG_DIR/examples/pinkNplace/manipulator_clustermppi_pinkNplace_workspace_example.cpp" "$MPPI_OBJ" "$CLUSTER_OBJ" \
+        -Wl,-rpath,$(dirname ${CUDART_LIB:-/dev/null}) \
+        $LDFLAGS \
+        -o "$GPU_BUILD_DIR/manipulator_clustermppi_pinkNplace_workspace_example"
+    echo "  → build/gpu/manipulator_clustermppi_pinkNplace_workspace_example 완료"
+
+    echo "[workspace] Building manipulator_bicmppi_pinkNplace_workspace_example ..."
+    $CXX $CXXFLAGS $WS_INCLUDES "$PKG_DIR/examples/pinkNplace/manipulator_bicmppi_pinkNplace_workspace_example.cpp" "$OBJ" \
+        -Wl,-rpath,$(dirname ${CUDART_LIB:-/dev/null}) \
+        $LDFLAGS \
+        -o "$GPU_BUILD_DIR/manipulator_bicmppi_pinkNplace_workspace_example"
+    echo "  → build/gpu/manipulator_bicmppi_pinkNplace_workspace_example 완료"
+
+    echo "[workspace] Building manipulator_mppi_random_pose_benchmark ..."
+    $CXX $CXXFLAGS $WS_INCLUDES "$PKG_DIR/examples/random_pose_benchmark/manipulator_mppi_random_pose_benchmark.cpp" "$MPPI_OBJ" \
+        -Wl,-rpath,$(dirname ${CUDART_LIB:-/dev/null}) \
+        $LDFLAGS \
+        -o "$GPU_BUILD_DIR/manipulator_mppi_random_pose_benchmark"
+    echo "  → build/gpu/manipulator_mppi_random_pose_benchmark 완료"
+
+    echo "[workspace] Building manipulator_logmppi_random_pose_benchmark ..."
+    $CXX $CXXFLAGS $WS_INCLUDES "$PKG_DIR/examples/random_pose_benchmark/manipulator_logmppi_random_pose_benchmark.cpp" "$MPPI_OBJ" "$LOG_OBJ" \
+        -Wl,-rpath,$(dirname ${CUDART_LIB:-/dev/null}) \
+        $LDFLAGS \
+        -o "$GPU_BUILD_DIR/manipulator_logmppi_random_pose_benchmark"
+    echo "  → build/gpu/manipulator_logmppi_random_pose_benchmark 완료"
+
+    echo "[workspace] Building manipulator_clustermppi_random_pose_benchmark ..."
+    $CXX $CXXFLAGS $WS_INCLUDES "$PKG_DIR/examples/random_pose_benchmark/manipulator_clustermppi_random_pose_benchmark.cpp" "$MPPI_OBJ" "$CLUSTER_OBJ" \
+        -Wl,-rpath,$(dirname ${CUDART_LIB:-/dev/null}) \
+        $LDFLAGS \
+        -o "$GPU_BUILD_DIR/manipulator_clustermppi_random_pose_benchmark"
+    echo "  → build/gpu/manipulator_clustermppi_random_pose_benchmark 완료"
+
+    echo "[workspace] Building manipulator_bicmppi_random_pose_benchmark ..."
+    $CXX $CXXFLAGS $WS_INCLUDES "$PKG_DIR/examples/random_pose_benchmark/manipulator_bicmppi_random_pose_benchmark.cpp" "$OBJ" \
+        -Wl,-rpath,$(dirname ${CUDART_LIB:-/dev/null}) \
+        $LDFLAGS \
+        -o "$GPU_BUILD_DIR/manipulator_bicmppi_random_pose_benchmark"
+    echo "  → build/gpu/manipulator_bicmppi_random_pose_benchmark 완료"
+
+    local GRID_WALL_SRC="$PKG_DIR/examples/grid_wall/manipulator_grid_wall_workspace_example.cpp"
+    if [ -f "$GRID_WALL_SRC" ]; then
+        echo "[workspace] Building manipulator_grid_wall_workspace_example ..."
+        $CXX $CXXFLAGS $WS_INCLUDES "$GRID_WALL_SRC" "$OBJ" \
+            -Wl,-rpath,$(dirname ${CUDART_LIB:-/dev/null}) \
+            $LDFLAGS \
+            -o "$GPU_BUILD_DIR/manipulator_grid_wall_workspace_example"
+        echo "  → build/gpu/manipulator_grid_wall_workspace_example 완료"
+    elif [ "$TARGET_GROUP" = "manipulator_grid_wall_workspace_example" ]; then
+        echo "ERROR: missing source: $GRID_WALL_SRC" >&2
+        exit 1
+    else
+        echo "[workspace] Skipping manipulator_grid_wall_workspace_example; source not found"
+    fi
+
+    local GRID_APPROACH_SRC="$PKG_DIR/examples/grid_wall/manipulator_grid_approach_workspace_example.cpp"
+    if [ -f "$GRID_APPROACH_SRC" ]; then
+        echo "[workspace] Building manipulator_grid_approach_workspace_example ..."
+        $CXX $CXXFLAGS $WS_INCLUDES "$GRID_APPROACH_SRC" "$OBJ" \
+            -Wl,-rpath,$(dirname ${CUDART_LIB:-/dev/null}) \
+            $LDFLAGS \
+            -o "$GPU_BUILD_DIR/manipulator_grid_approach_workspace_example"
+        echo "  → build/gpu/manipulator_grid_approach_workspace_example 완료"
+    elif [ "$TARGET_GROUP" = "manipulator_grid_approach_workspace_example" ]; then
+        echo "ERROR: missing source: $GRID_APPROACH_SRC" >&2
+        exit 1
+    fi
+}
+
 # ===========================================================================
 # 빌드할 소스 파일 선택 (사용할 예제의 주석을 해제하세요)
 # ===========================================================================
@@ -219,6 +367,10 @@ case "$TARGET_GROUP" in
         build_target src/manipulator/gpu/bi_mppi.cpp
         build_target src/manipulator/gpu/svgd_mppi.cpp
         build_target src/manipulator/gpu/mppi_cylinder.cpp
+        ;;
+    manipulator_workspace_collision|manipulator_bicmppi_workspace_example|manipulator_grid_wall_workspace_example|manipulator_grid_approach_workspace_example)
+        # ---- Manipulator workspace link-collision BiC-MPPI 예제 ----
+        build_manipulator_workspace_collision_target
         ;;
     quadrotor)
         # ---- Quadrotor GPU 버전 ----
@@ -318,7 +470,7 @@ case "$TARGET_GROUP" in
         ;;
     *)
         echo "ERROR: unknown GPU target group: $TARGET_GROUP"
-        echo "Usage: bash build_gpu.sh [manipulator|quadrotor|quadrotor_log_mppi|quadrotor_gpu_new|wmrobot|wmrobot_log_mppi|wmrobot_ablation|wmrobot_same_budget|wmrobot_waypoint|wmrobot_waypoint_stitched|wmrobot_waypoint_stitched_sequential|wmrobot_map_285|velo]"
+        echo "Usage: bash build_gpu.sh [manipulator|manipulator_workspace_collision|manipulator_grid_wall_workspace_example|manipulator_grid_approach_workspace_example|quadrotor|quadrotor_log_mppi|quadrotor_gpu_new|wmrobot|wmrobot_log_mppi|wmrobot_ablation|wmrobot_same_budget|wmrobot_waypoint|wmrobot_waypoint_stitched|wmrobot_waypoint_stitched_sequential|wmrobot_map_285|velo]"
         exit 1
         ;;
 esac
@@ -329,6 +481,29 @@ if [ "$TARGET_GROUP" = "manipulator" ]; then
     echo "실행: cd build && ./gpu/mppi"
     echo "      cd build && ./gpu/bi_mppi"
     echo "      cd build && ./gpu/cluster_mppi"
+elif [ "$TARGET_GROUP" = "manipulator_workspace_collision" ] || \
+     [ "$TARGET_GROUP" = "manipulator_bicmppi_workspace_example" ] || \
+     [ "$TARGET_GROUP" = "manipulator_grid_wall_workspace_example" ] || \
+     [ "$TARGET_GROUP" = "manipulator_grid_approach_workspace_example" ]; then
+    echo "실행: cd build && ./gpu/manipulator_mppi_workspace_example"
+    echo "      cd build && ./gpu/manipulator_logmppi_workspace_example"
+    echo "      cd build && ./gpu/manipulator_clustermppi_workspace_example"
+    echo "      cd build && ./gpu/manipulator_bicmppi_workspace_example"
+    echo "      cd build && ./gpu/manipulator_mppi_pinkNplace_workspace_example"
+    echo "      cd build && ./gpu/manipulator_logmppi_pinkNplace_workspace_example"
+    echo "      cd build && ./gpu/manipulator_clustermppi_pinkNplace_workspace_example"
+    echo "      cd build && ./gpu/manipulator_bicmppi_pinkNplace_workspace_example"
+    echo "      cd build && ./gpu/manipulator_mppi_random_pose_benchmark"
+    echo "      cd build && ./gpu/manipulator_logmppi_random_pose_benchmark"
+    echo "      cd build && ./gpu/manipulator_clustermppi_random_pose_benchmark"
+    echo "      cd build && ./gpu/manipulator_bicmppi_random_pose_benchmark"
+    echo "      cd build && ./gpu/manipulator_grid_wall_workspace_example --init 0 --goal 8"
+    echo "      cd build && ./gpu/manipulator_grid_approach_workspace_example --goal 8"
+    echo "출력: build/manipulator_workspace_{mppi,logmppi,clustermppi,bicmppi}_*.csv"
+    echo "      build/manipulator_pinkNplace_{mppi,logmppi,clustermppi,bicmppi}_*.csv"
+    echo "      random_pose_benchmark/results/"
+    echo "      build/manipulator_grid_wall_bicmppi_*.csv"
+    echo "      build/manipulator_grid_approach_bicmppi_*.csv"
 elif [ "$TARGET_GROUP" = "quadrotor_log_mppi" ]; then
     echo "실행: cd build && ./gpu/quadrotor_log_mppi"
 elif [ "$TARGET_GROUP" = "quadrotor_gpu_new" ]; then
@@ -361,5 +536,10 @@ else
     echo "      cd build && ./gpu/${TARGET_GROUP}_cluster_mppi"
 fi
 echo ""
-echo "시각화: cd build && ./gpu/vis_mppi && python3 visualize_mppi.py vis_data/mppi/"
-echo "        cd build && ./gpu/vis_bi_mppi && python3 visualize_mppi.py vis_data/bi_mppi/"
+if [ "$TARGET_GROUP" != "manipulator_workspace_collision" ] && \
+   [ "$TARGET_GROUP" != "manipulator_bicmppi_workspace_example" ] && \
+   [ "$TARGET_GROUP" != "manipulator_grid_wall_workspace_example" ] && \
+   [ "$TARGET_GROUP" != "manipulator_grid_approach_workspace_example" ]; then
+    echo "시각화: cd build && ./gpu/vis_mppi && python3 visualize_mppi.py vis_data/mppi/"
+    echo "        cd build && ./gpu/vis_bi_mppi && python3 visualize_mppi.py vis_data/bi_mppi/"
+fi

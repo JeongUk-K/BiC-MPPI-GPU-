@@ -1,0 +1,193 @@
+--- /mnt/data/bi_mppi_gpu(2).cu	2026-06-23 06:18:46.266989734 +0000
++++ /mnt/data/manipulator_workspace_collision_package/src/bi_mppi_gpu.cu	2026-06-23 07:06:47.735487439 +0000
+@@ -28,6 +28,8 @@
+     int max_row, int max_col, double res,
+     const double* d_circles, int n_circ,
+     const double* d_rects,   int n_rect,
++    const double* d_ws_boxes, int n_ws_boxes,
++    double ws_link_radius, double ws_safe_margin, double ws_hard_margin,
+     int N, int dim_u, int dim_x, int T, double dt, double gamma_u,
+     int model_type)
+ {
+@@ -56,7 +58,9 @@
+     double cost = 0.0;
+     bool hit = false;
+     if (legacy_cuda_collision_grid(x, with_map, d_map, max_row, max_col, res,
+-                                   d_circles, n_circ, d_rects, n_rect)) {
++                                   d_circles, n_circ, d_rects, n_rect,
++                                   d_ws_boxes, n_ws_boxes, ws_link_radius,
++                                   ws_safe_margin, ws_hard_margin, model_type)) {
+         hit = true; cost = 1e8;
+     }
+ 
+@@ -67,12 +71,17 @@
+             if (j == T-1) u_local[_d] = Ui_i[_d*T+j];
+             else          u_local[_d] = Ui_i[_d*T+j+1];
+         }
++        cost += legacy_cuda_stage_cost(x, u_local, dim_x, dim_u, model_type,
++                                       d_ws_boxes, n_ws_boxes, ws_link_radius,
++                                       ws_safe_margin, ws_hard_margin);
+         legacy_cuda_dynamics(x, u_local, xd_, dim_x, dim_u, model_type);
+         for (int d = 0; d < dim_x; ++d) xn[d] = x[d] - dt * xd_[d];
+         for (int d = 0; d < dim_x; ++d) x[d] = xn[d];
+         cost += legacy_cuda_terminal_cost(x, d_x_init, dim_x, model_type);
+         if (legacy_cuda_collision_grid(x, with_map, d_map, max_row, max_col, res,
+-                                       d_circles, n_circ, d_rects, n_rect)) {
++                                       d_circles, n_circ, d_rects, n_rect,
++                                       d_ws_boxes, n_ws_boxes, ws_link_radius,
++                                       ws_safe_margin, ws_hard_margin, model_type)) {
+             hit = true; cost = 1e8;
+         }
+     }
+@@ -96,6 +105,8 @@
+     int max_row, int max_col, double res,
+     const double* d_circles, int n_circ,
+     const double* d_rects,   int n_rect,
++    const double* d_ws_boxes, int n_ws_boxes,
++    double ws_link_radius, double ws_safe_margin, double ws_hard_margin,
+     int N, int dim_u, int dim_x, int Tr, double dt, double gamma_u,
+     int model_type)
+ {
+@@ -117,7 +128,9 @@
+     bool hit = false;
+     double guide_cost = 0.0;
+     if (legacy_cuda_collision_grid(x, with_map, d_map, max_row, max_col, res,
+-                                   d_circles, n_circ, d_rects, n_rect)) {
++                                   d_circles, n_circ, d_rects, n_rect,
++                                   d_ws_boxes, n_ws_boxes, ws_link_radius,
++                                   ws_safe_margin, ws_hard_margin, model_type)) {
+         hit = true; cost = 1e8;
+     }
+ 
+@@ -132,13 +145,18 @@
+         guide_cost += sqrt(gc);
+         double u_local[GPU_MAX_DIM_U];
+         for (int _d = 0; _d < dim_u; ++_d) u_local[_d] = Ui_i[_d*Tr+t];
++        cost += legacy_cuda_stage_cost(x, u_local, dim_x, dim_u, model_type,
++                                       d_ws_boxes, n_ws_boxes, ws_link_radius,
++                                       ws_safe_margin, ws_hard_margin);
+         legacy_cuda_dynamics(x, u_local, xd_, dim_x, dim_u, model_type);
+         for (int d = 0; d < dim_x; ++d) xn[d] = x[d] + dt*xd_[d];
+ 
+         for (int d = 0; d < dim_x; ++d) x[d] = xn[d];
+         if (legacy_cuda_collision_grid(x, with_map, d_map, max_row, max_col,
+                                        res, d_circles, n_circ, d_rects,
+-                                       n_rect)) {
++                                       n_rect, d_ws_boxes, n_ws_boxes,
++                                       ws_link_radius, ws_safe_margin,
++                                       ws_hard_margin, model_type)) {
+             hit = true; cost = 1e8;
+         }
+     }
+@@ -149,7 +167,7 @@
+             gc += diff*diff;
+         }
+         guide_cost += sqrt(gc);
+-        cost = legacy_cuda_terminal_cost(x, d_x_target, dim_x, model_type);
++        cost += legacy_cuda_terminal_cost(x, d_x_target, dim_x, model_type);
+         cost += guide_cost;
+     }
+     d_costs[i] = cost;
+@@ -188,6 +206,7 @@
+     safe_cuda_malloc(&d_x_init, 0); safe_cuda_malloc(&d_x_target, 0);
+     safe_cuda_malloc(&d_sigma, 0);
+     safe_cuda_malloc(&d_map, 0); safe_cuda_malloc(&d_circles, 0);
++    safe_cuda_malloc(&d_rects, 0); safe_cuda_malloc(&d_ws_boxes, 0);
+     safe_cuda_malloc(&d_rects, 0);
+ }
+ 
+@@ -259,6 +278,7 @@
+ }
+ 
+ void BiMPPI_GPU::uploadCollisionData() {
++    if (!collision_checker) return;
+     map_max_row = (int)collision_checker->map.size();
+     map_max_col = map_max_row>0?(int)collision_checker->map[0].size():0;
+     map_resolution = collision_checker->resolution;
+@@ -289,8 +309,22 @@
+         for (int i=0;i<n_rects;++i) for(int j=0;j<4;++j) buf[i*4+j]=collision_checker->rectangles[i][j];
+         CUDA_CHECK(cudaMemcpy(d_rects,buf.data(),sz,cudaMemcpyHostToDevice));
+     }
++    n_ws_boxes=(int)collision_checker->workspace_boxes.size();
++    ws_link_radius = collision_checker->link_radius;
++    ws_safe_margin = collision_checker->workspace_safe_margin;
++    ws_hard_margin = collision_checker->workspace_hard_margin;
++    if (n_ws_boxes>0) {
++        size_t sz=(size_t)n_ws_boxes*6*sizeof(double);
++        safe_cuda_malloc(&d_ws_boxes,sz);
++        std::vector<double> buf(n_ws_boxes*6);
++        for (int i=0;i<n_ws_boxes;++i)
++            for(int j=0;j<6;++j)
++                buf[i*6+j]=collision_checker->workspace_boxes[i][j];
++        CUDA_CHECK(cudaMemcpy(d_ws_boxes,buf.data(),sz,cudaMemcpyHostToDevice));
++    }
+ }
+ 
++
+ // ── Helper: Eigen → flat row-major ────────────────────────────────
+ static std::vector<double> eigen_to_flat(const Eigen::MatrixXd& M, int rows, int cols) {
+     std::vector<double> v(rows*cols);
+@@ -361,7 +395,9 @@
+     int B=256,G=(Nf+B-1)/B;
+     bi_rollout_kernel<<<G,B>>>(d_Uf0,d_Ufi,d_noise_f,d_sigma,d_x_init,d_x_target,
+         d_costs_f,d_Di_f,with_map,d_map,map_max_row,map_max_col,map_resolution,
+-        d_circles,n_circles,d_rects,n_rects,Nf,dim_u,dim_x,Tf,(double)dt,gamma_u,model_type,true);
++        d_circles,n_circles,d_rects,n_rects,d_ws_boxes,n_ws_boxes,
++        ws_link_radius,ws_safe_margin,ws_hard_margin,
++        Nf,dim_u,dim_x,Tf,(double)dt,gamma_u,model_type,true);
+     CUDA_CHECK(cudaGetLastError()); CUDA_CHECK(cudaDeviceSynchronize());
+     auto t1=std::chrono::high_resolution_clock::now();
+     elapsed_rollout+=std::chrono::duration<double>(t1-t0).count();
+@@ -385,7 +421,9 @@
+     int B=256,G=(Nb+B-1)/B;
+     backward_rollout_kernel<<<G,B>>>(d_Ub0,d_Ubi,d_noise_b,d_sigma,d_x_init,d_x_target,
+         d_costs_b,d_Di_b,with_map,d_map,map_max_row,map_max_col,map_resolution,
+-        d_circles,n_circles,d_rects,n_rects,Nb,dim_u,dim_x,Tb,(double)dt,gamma_u,model_type);
++        d_circles,n_circles,d_rects,n_rects,d_ws_boxes,n_ws_boxes,
++        ws_link_radius,ws_safe_margin,ws_hard_margin,
++        Nb,dim_u,dim_x,Tb,(double)dt,gamma_u,model_type);
+     CUDA_CHECK(cudaGetLastError()); CUDA_CHECK(cudaDeviceSynchronize());
+     auto t1=std::chrono::high_resolution_clock::now();
+     elapsed_rollout+=std::chrono::duration<double>(t1-t0).count();
+@@ -577,7 +615,9 @@
+     int B=256,G=(Nf+B-1)/B;
+     bi_rollout_kernel<<<G,B>>>(d_Uf0,d_Ufi,d_noise_f,d_sigma,d_x_init,d_x_target,
+         d_costs_f,d_Di_f,with_map,d_map,map_max_row,map_max_col,map_resolution,
+-        d_circles,n_circles,d_rects,n_rects,Nf,dim_u,dim_x,Tf,(double)dt,gamma_u,model_type,true);
++        d_circles,n_circles,d_rects,n_rects,d_ws_boxes,n_ws_boxes,
++        ws_link_radius,ws_safe_margin,ws_hard_margin,
++        Nf,dim_u,dim_x,Tf,(double)dt,gamma_u,model_type,true);
+     CUDA_CHECK(cudaGetLastError()); CUDA_CHECK(cudaDeviceSynchronize());
+     auto t1=std::chrono::high_resolution_clock::now();
+     elapsed_rollout+=std::chrono::duration<double>(t1-t0).count();
+@@ -615,7 +655,9 @@
+     int B=256,G=(Nb+B-1)/B;
+     backward_rollout_kernel<<<G,B>>>(d_Ub0,d_Ubi,d_noise_b,d_sigma,d_x_init,d_x_target,
+         d_costs_b,d_Di_b,with_map,d_map,map_max_row,map_max_col,map_resolution,
+-        d_circles,n_circles,d_rects,n_rects,Nb,dim_u,dim_x,Tb,(double)dt,gamma_u,model_type);
++        d_circles,n_circles,d_rects,n_rects,d_ws_boxes,n_ws_boxes,
++        ws_link_radius,ws_safe_margin,ws_hard_margin,
++        Nb,dim_u,dim_x,Tb,(double)dt,gamma_u,model_type);
+     CUDA_CHECK(cudaGetLastError()); CUDA_CHECK(cudaDeviceSynchronize());
+     auto t1=std::chrono::high_resolution_clock::now();
+     elapsed_rollout+=std::chrono::duration<double>(t1-t0).count();
+@@ -718,7 +760,8 @@
+         CURAND_CHECK(curandGenerateNormalDouble(curand_gen,d_noise_r,ncnt,0.0,1.0));
+         int B=256,G=(Nr+B-1)/B;
+         guide_rollout_kernel<<<G,B>>>(d_Ur0,d_Uri,d_noise_r,d_sigma,d_x_init,d_x_target,d_Xref,d_costs_r,
+-            with_map,d_map,map_max_row,map_max_col,map_resolution,d_circles,n_circles,d_rects,n_rects,
++            with_map,d_map,map_max_row,map_max_col,map_resolution,d_circles,n_circles,d_rects,n_rects,d_ws_boxes,n_ws_boxes,
++            ws_link_radius,ws_safe_margin,ws_hard_margin,
+             Nr,dim_u,dim_x,Tr,(double)dt,gamma_u,model_type);
+         CUDA_CHECK(cudaGetLastError()); CUDA_CHECK(cudaDeviceSynchronize());
+         std::vector<double> hcr(Nr),hri((size_t)Nr*dim_u*Tr);
+@@ -810,7 +853,8 @@
+     guide_rollout_kernel<<<G, B>>>(
+         d_Ur0, d_Uri, d_noise_r, d_sigma, d_x_init, d_x_target, d_Xref,
+         d_costs_r, with_map, d_map, map_max_row, map_max_col, map_resolution,
+-        d_circles, n_circles, d_rects, n_rects, Nr, dim_u, dim_x, Tr,
++        d_circles, n_circles, d_rects, n_rects, d_ws_boxes, n_ws_boxes,
++        ws_link_radius, ws_safe_margin, ws_hard_margin, Nr, dim_u, dim_x, Tr,
+         (double)dt, gamma_u, model_type);
+     CUDA_CHECK(cudaGetLastError());
+     CUDA_CHECK(cudaDeviceSynchronize());
