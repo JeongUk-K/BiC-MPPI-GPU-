@@ -20,16 +20,23 @@
 // BiMPPI_GPU — Bidirectional MPPI with GPU rollout
 //
 // Forward/backward rollout + guide MPPI on GPU.
-// DBSCAN, selectConnection, concatenate stay on CPU.
+// Clustering is selectable between CPU DBSCAN and fastsc GPU K-means.
 // ============================================================
 class BiMPPI_GPU {
 public:
+  enum class ConnectionMetric {
+    Euclidean,
+    SE2,
+  };
+
   template <typename ModelClass> BiMPPI_GPU(ModelClass model);
   ~BiMPPI_GPU();
 
   void init(BiMPPIParam param);
   void setCollisionChecker(CollisionChecker *cc);
   void setSeed(std::uint_fast64_t seed);
+  void setConnectionMetric(ConnectionMetric metric);
+  void setSE2ConnectionWeights(double xy_weight, double theta_weight);
   void solve();
   void move();
   double connectionDistance() const;
@@ -63,6 +70,13 @@ protected:
   double deviation_mu, cost_mu, epsilon;
   int minpts;
   double psi;
+  ClusteringMethod clustering_method = ClusteringMethod::DBSCAN;
+  int kmeans_clusters = 5;
+  int kmeans_max_iterations = 100;
+  double kmeans_threshold = 1e-6;
+  ConnectionMetric connection_metric = ConnectionMetric::Euclidean;
+  double se2_connection_xy_weight = 0.2;
+  double se2_connection_theta_weight = 1.0;
 
   CollisionChecker *collision_checker;
   MPPIVisLogger *vis_logger = nullptr;
@@ -121,6 +135,9 @@ protected:
   void forwardRawRollout(Eigen::VectorXd &costs, Eigen::MatrixXd &Ui_cpu);
   void appendVisRolloutSamples(const Eigen::MatrixXd &Ui_cpu, int N_samples,
                                int T_steps, bool backward);
+  double connectionMetricDistance(
+      const Eigen::Ref<const Eigen::VectorXd> &xf,
+      const Eigen::Ref<const Eigen::VectorXd> &xb) const;
   void selectConnection();
   void concatenate();
   void guideMPPI();
@@ -129,6 +146,9 @@ protected:
   void dbscan(std::vector<std::vector<int>> &clusters,
               const Eigen::MatrixXd &Di, const Eigen::VectorXd &costs,
               int N_samples);
+  void kmeansCluster(std::vector<std::vector<int>> &clusters,
+                     const Eigen::MatrixXd &feature_source,
+                     const Eigen::VectorXd &costs, int N_samples);
   void calculateU(Eigen::MatrixXd &Uout,
                   const std::vector<std::vector<int>> &clusters,
                   const Eigen::VectorXd &costs, const Eigen::MatrixXd &Ui_cpu,

@@ -324,6 +324,13 @@ for path in sorted(root.rglob("*.csv")):
     if (path.name in SKIP_NAMES or path.name.startswith("path_") or
             path.name.startswith("trajectory") or "progress" in path.name):
         continue
+    # Most examples write both per-run result_foo.csv and a derived
+    # result_foo_summary.csv. Prefer the per-run data when both exist so the
+    # aggregate contains one row per variant instead of duplicate statistics.
+    if path.name.endswith("_summary.csv"):
+        run_csv = path.with_name(path.name.replace("_summary.csv", ".csv"))
+        if run_csv.exists():
+            continue
     try:
         with path.open(newline="") as f:
             rows = list(csv.DictReader(f))

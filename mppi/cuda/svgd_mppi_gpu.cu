@@ -1,5 +1,6 @@
 #include "mppi_gpu.cuh"
 #include "svgd_mppi_gpu.cuh"
+#include "gpu_kmeans.cuh"
 #include <algorithm>
 #include <cassert>
 #include <cstring>
@@ -493,6 +494,10 @@ void SVGDMPPI_GPU::init(SVGDMPPIParam p) {
   Ns = p.Ns;
   istep = p.istep;
   cost_mu = p.cost_mu;
+  clustering_method = p.clustering_method;
+  kmeans_clusters = p.kmeans_clusters;
+  kmeans_max_iterations = p.kmeans_max_iterations;
+  kmeans_threshold = p.kmeans_threshold;
   sigma_diag.resize(dim_u);
   for (int d = 0; d < dim_u; ++d)
     sigma_diag[d] = p.sigma_u(d, d);
@@ -651,8 +656,12 @@ void SVGDMPPI_GPU::forwardRollout() {
   Eigen::MatrixXd Di_f = flat_Di_to_eigen_col(hDi, Nf, dim_u);
   bool ok = (costs_f.array() < 1e7).all();
   clusters_f.clear();
-  if (!ok)
-    dbscan(clusters_f, Di_f, costs_f, Nf);
+  if (!ok) {
+    if (clustering_method == ClusteringMethod::KMeans)
+      kmeansCluster(clusters_f, Di_f, costs_f, Nf);
+    else
+      dbscan(clusters_f, Di_f, costs_f, Nf);
+  }
   if (clusters_f.empty())
     clusters_f.push_back(full_cluster_f);
   calculateU(Uf, clusters_f, costs_f, Ui_f, Tf);
@@ -757,8 +766,12 @@ void SVGDMPPI_GPU::backwardRollout() {
   Eigen::MatrixXd Di_b = flat_Di_to_eigen_col(hDi, Nb, dim_u);
   bool ok = (costs_b.array() < 1e7).all();
   clusters_b.clear();
-  if (!ok)
-    dbscan(clusters_b, Di_b, costs_b, Nb);
+  if (!ok) {
+    if (clustering_method == ClusteringMethod::KMeans)
+      kmeansCluster(clusters_b, Di_b, costs_b, Nb);
+    else
+      dbscan(clusters_b, Di_b, costs_b, Nb);
+  }
   if (clusters_b.empty())
     clusters_b.push_back(full_cluster_b);
   calculateU(Ub, clusters_b, costs_b, Ui_b, Tb);
@@ -889,7 +902,16 @@ void SVGDMPPI_GPU::guideMPPI() {
   u0 = Uo.col(0);
 }
 
-// Emptied unused functions
+void SVGDMPPI_GPU::kmeansCluster(
+    std::vector<std::vector<int>> &clusters, const Eigen::MatrixXd &feature,
+    const Eigen::VectorXd &costs, int sample_count) {
+  if (feature.cols() != sample_count)
+    throw std::invalid_argument("K-means feature sample count mismatch");
+  runGPUKMeans(clusters, feature, costs,
+               {kmeans_clusters, kmeans_max_iterations, kmeans_threshold,
+                1e7});
+}
+
 void SVGDMPPI_GPU::dbscan(std::vector<std::vector<int>> &clusters,
                           const Eigen::MatrixXd &Di,
                           const Eigen::VectorXd &costs, int Ns) {

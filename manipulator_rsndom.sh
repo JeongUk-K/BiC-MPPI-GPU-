@@ -3,7 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 BUILD_DIR="$SCRIPT_DIR/build"
-DEFAULT_BENCHMARK_DIR="$SCRIPT_DIR/random_pose_benchmark/results"
+DEFAULT_BENCHMARK_DIR="$SCRIPT_DIR/result/manipulator"
 BENCHMARK_DIR="$DEFAULT_BENCHMARK_DIR"
 BENCHMARK_DIR_CUSTOM=0
 OUT_DIR=""
@@ -33,7 +33,7 @@ Options:
   --solver NAME         Run/render one solver: mppi, logmppi, clustermppi, bicmppi
                         Can be passed multiple times. Default: all solvers
   --benchmark-dir DIR   Existing benchmark CSV directory for --skip-run
-                        Default: random_pose_benchmark/results
+                        Default: result/manipulator
   --out-dir DIR         GIF output directory
                         Default: <benchmark-dir>/gifs
   --fps N              GIF frame rate. Default: 12
@@ -165,7 +165,7 @@ fi
 
 if [[ "$BENCHMARK_DIR_CUSTOM" -eq 1 && "$SKIP_RUN" -eq 0 && "$BENCHMARK_DIR" != "$DEFAULT_BENCHMARK_DIR" ]]; then
   echo "error: --benchmark-dir can only be used with --skip-run" >&2
-  echo "hint: the C++ random_pose_benchmark examples write to random_pose_benchmark/results" >&2
+  echo "hint: the C++ random_pose_benchmark examples write to result/manipulator" >&2
   exit 2
 fi
 

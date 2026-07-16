@@ -5,6 +5,8 @@
 #include "model_base.h"
 #include "mppi_param.h"
 #include "mppi_vis_logger.h"
+#include "rollout_ee_callback.h"
+#include "rollout_state_callback.h"
 
 #include <Eigen/Dense>
 #include <chrono>
@@ -29,6 +31,12 @@ public:
   void move();
   double connectionDistance() const { return 0.0; }
   void setVisLogger(MPPIVisLogger *logger) { vis_logger = logger; }
+  void setRolloutEECallback(RolloutEEBatchCallback callback) {
+    rollout_ee_callback = std::move(callback);
+  }
+  void setRolloutStateCallback(RolloutStateBatchCallback callback) {
+    rollout_state_callback = std::move(callback);
+  }
 
   Eigen::MatrixXd U_0;
   Eigen::VectorXd x_init;
@@ -56,6 +64,8 @@ protected:
 
   CollisionChecker *collision_checker = nullptr;
   MPPIVisLogger *vis_logger = nullptr;
+  RolloutEEBatchCallback rollout_ee_callback;
+  RolloutStateBatchCallback rollout_state_callback;
   std::vector<Eigen::VectorXd> visual_traj;
 
   double *d_U0 = nullptr;

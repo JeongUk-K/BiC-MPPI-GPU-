@@ -6,6 +6,7 @@
 
 #include <Eigen/Dense>
 #include <chrono>
+#include <cstdint>
 #include <fstream>
 #include <iostream>
 #include <stdexcept>
@@ -24,7 +25,7 @@ int main(int argc, char **argv) {
   param.x_init << 2.5, 0.0, M_PI_2;
   param.x_target.resize(model.dim_x);
   param.x_target << 1.5, 5.0, M_PI_2;
-  param.N = 10000;
+  param.N = 6000;
   param.gamma_u = 10.0;
   Eigen::VectorXd sigma_u(model.dim_u);
   sigma_u << 0.6, 0.6;
@@ -36,6 +37,8 @@ int main(int argc, char **argv) {
   int maxiter = 200;
   int vis_every = 1;
   bool save_rollouts = true;
+  bool has_seed = false;
+  std::uint_fast64_t seed = 0;
   std::string dataset_dir = "../BARN_dataset/txt_files";
 
   for (int i = 1; i < argc; ++i) {
@@ -67,6 +70,18 @@ int main(int argc, char **argv) {
       param.T = std::stoi(require_value(key));
     } else if (key == "--N") {
       param.N = std::stoi(require_value(key));
+    } else if (key == "--seed") {
+      seed = static_cast<std::uint_fast64_t>(
+          std::stoull(require_value(key)));
+      has_seed = true;
+    } else if (key == "--clustering") {
+      param.clustering_method = parseClusteringMethod(require_value(key));
+    } else if (key == "--kmeans-clusters") {
+      param.kmeans_clusters = std::stoi(require_value(key));
+    } else if (key == "--kmeans-iters") {
+      param.kmeans_max_iterations = std::stoi(require_value(key));
+    } else if (key == "--kmeans-threshold") {
+      param.kmeans_threshold = std::stod(require_value(key));
     } else if (key == "--dataset-dir") {
       dataset_dir = require_value(key);
     } else if (key == "--vis-every") {
@@ -83,6 +98,11 @@ int main(int argc, char **argv) {
           << "  --maxiter N          Max closed-loop iterations. Default: 200\n"
           << "  --T N                Horizon. Default: 100\n"
           << "  --N N                Rollout count. Default: 10000\n"
+          << "  --seed N             Fixed CUDA random seed\n"
+          << "  --clustering NAME    dbscan or kmeans. Default: dbscan\n"
+          << "  --kmeans-clusters N  K-means cluster count. Default: 5\n"
+          << "  --kmeans-iters N     K-means max iterations. Default: 100\n"
+          << "  --kmeans-threshold X K-means convergence threshold. Default: 1e-6\n"
           << "  --dataset-dir DIR    BARN txt file directory\n"
           << "  --vis-every N        Save rollout data every N iterations. Default: 1\n"
           << "  --no-rollouts        Save CSV files only\n";
@@ -91,6 +111,10 @@ int main(int argc, char **argv) {
       throw std::runtime_error("Unknown argument: " + key);
     }
   }
+
+  if (param.kmeans_clusters <= 0 || param.kmeans_max_iterations <= 0 ||
+      param.kmeans_threshold < 0.0)
+    throw std::runtime_error("K-means parameters must be positive (threshold may be zero)");
 
   const std::string variant = "Cluster-MPPI";
   std::vector<WmrobotGpuRunResult> runs;
@@ -126,6 +150,7 @@ int main(int argc, char **argv) {
                                     std::to_string(map) + ".txt",
                                 0.1);
       Solver solver(model);
+      if (has_seed) solver.setSeed(seed);
       solver.U_0 = Eigen::MatrixXd::Zero(model.dim_u, param.T);
       solver.init(param);
       solver.setCollisionChecker(&collision_checker);

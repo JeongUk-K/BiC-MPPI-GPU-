@@ -85,16 +85,16 @@ if [ "$MODE" = "random_pose" ] || [ "$MODE" = "all" ]; then
 
   echo ""
   echo "Random pose benchmark outputs:"
-  echo "  $SCRIPT_DIR/random_pose_benchmark/results/manipulator_random_pose_benchmark_mppi_stats.csv"
-  echo "  $SCRIPT_DIR/random_pose_benchmark/results/manipulator_random_pose_benchmark_logmppi_stats.csv"
-  echo "  $SCRIPT_DIR/random_pose_benchmark/results/manipulator_random_pose_benchmark_clustermppi_stats.csv"
-  echo "  $SCRIPT_DIR/random_pose_benchmark/results/manipulator_random_pose_benchmark_bicmppi_stats.csv"
-  echo "  $SCRIPT_DIR/random_pose_benchmark/results/manipulator_random_pose_benchmark_final_stats.csv"
-  echo "  $SCRIPT_DIR/random_pose_benchmark/results/gifs/"
+  echo "  $SCRIPT_DIR/result/manipulator/manipulator_random_pose_benchmark_mppi_stats.csv"
+  echo "  $SCRIPT_DIR/result/manipulator/manipulator_random_pose_benchmark_logmppi_stats.csv"
+  echo "  $SCRIPT_DIR/result/manipulator/manipulator_random_pose_benchmark_clustermppi_stats.csv"
+  echo "  $SCRIPT_DIR/result/manipulator/manipulator_random_pose_benchmark_bicmppi_stats.csv"
+  echo "  $SCRIPT_DIR/result/manipulator/manipulator_random_pose_benchmark_final_stats.csv"
+  echo "  $SCRIPT_DIR/result/manipulator/gifs/"
 
   echo ""
   echo "[gif] rendering random pose benchmark motions and final stats"
   python3 "$SCRIPT_DIR/visualize_manipulator_random_pose_benchmark_gifs.py" \
     --build-dir "$SCRIPT_DIR/build" \
-    --benchmark-dir "$SCRIPT_DIR/random_pose_benchmark/results"
+    --benchmark-dir "$SCRIPT_DIR/result/manipulator"
 fi

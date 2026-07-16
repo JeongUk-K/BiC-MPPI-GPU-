@@ -4,5 +4,5 @@
 int main() {
   const auto params = manipulator_random_pose_benchmark::randomPoseSolverParams();
   return manipulator_random_pose_benchmark::runBidirectionalBenchmark<BiMPPI_GPU>(
-      "bicmppi", "BiC-MPPI", params.bicmppi);
+      "bicmppi", "BiC-MPPI (K-means)", params.bicmppi);
 }

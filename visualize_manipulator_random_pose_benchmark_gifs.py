@@ -43,7 +43,7 @@ def parse_args():
         "--benchmark-dir",
         default=None,
         type=Path,
-        help="Benchmark output directory. Defaults to random_pose_benchmark/results",
+        help="Benchmark output directory. Defaults to result/manipulator",
     )
     parser.add_argument(
         "--out-dir",
@@ -661,7 +661,7 @@ def main():
     benchmark_dir = (
         args.benchmark_dir.resolve()
         if args.benchmark_dir is not None
-        else Path("random_pose_benchmark/results").resolve()
+        else Path("result/manipulator").resolve()
     )
     out_dir = (
         args.out_dir.resolve()

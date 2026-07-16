@@ -21,10 +21,16 @@ public:
   Eigen::MatrixXd X;
 
   void solve() override;
+  void init(MPPIParam param);
 
   void dbscan(std::vector<std::vector<int>> &clusters,
               const Eigen::MatrixXd &feature_source,
               const Eigen::VectorXd &costs, int N_samples, int T_steps);
+
+  void kmeansCluster(std::vector<std::vector<int>> &clusters,
+                     const Eigen::MatrixXd &feature_source,
+                     const Eigen::VectorXd &costs, int N_samples,
+                     int T_steps);
 
   void calculateU(Eigen::MatrixXd &Uout,
                   const std::vector<std::vector<int>> &clusters,
@@ -35,6 +41,10 @@ private:
   double deviation_mu = 1.0;
   double epsilon = 3.8;
   int minpts = 8;
+  ClusteringMethod clustering_method = ClusteringMethod::DBSCAN;
+  int kmeans_clusters = 5;
+  int kmeans_max_iterations = 100;
+  double kmeans_threshold = 1e-6;
 };
 
 template <typename ModelClass>

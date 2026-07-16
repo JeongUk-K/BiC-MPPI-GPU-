@@ -16,7 +16,7 @@ namespace {
 
 struct MppiConfig {
   int T = 100;
-  int N = 10000;
+  int N = 6000;
   int maxiter = 200;
   int map_begin = 299;
   int num_maps = 300;

@@ -7,8 +7,10 @@
 #include <chrono>
 #include <fstream>
 #include <iostream>
+#include <stdexcept>
+#include <string>
 
-int main() {
+int main(int argc, char **argv) {
   auto model = WMRobotMap();
 
   using Solver = SVGDMPPI_GPU;
@@ -38,6 +40,37 @@ int main() {
   param.minpts = 5;
   param.epsilon = 0.01;
   param.psi = 0.6;
+
+  for (int i = 1; i < argc; ++i) {
+    const std::string key = argv[i];
+    auto require_value = [&](const std::string &name) -> std::string {
+      if (i + 1 >= argc) throw std::runtime_error("Missing value for " + name);
+      return argv[++i];
+    };
+    if (key == "--clustering") {
+      param.clustering_method = parseClusteringMethod(require_value(key));
+    } else if (key == "--kmeans-clusters") {
+      param.kmeans_clusters = std::stoi(require_value(key));
+    } else if (key == "--kmeans-iters") {
+      param.kmeans_max_iterations = std::stoi(require_value(key));
+    } else if (key == "--kmeans-threshold") {
+      param.kmeans_threshold = std::stod(require_value(key));
+    } else if (key == "--help" || key == "-h") {
+      std::cout
+          << "Usage: wmrobot_svgd_mppi [options]\n"
+          << "  --clustering NAME    dbscan or kmeans. Default: dbscan\n"
+          << "  --kmeans-clusters N  K-means cluster count. Default: 5\n"
+          << "  --kmeans-iters N     K-means max iterations. Default: 100\n"
+          << "  --kmeans-threshold X K-means convergence threshold. Default: 1e-6\n";
+      return 0;
+    } else {
+      throw std::runtime_error("Unknown argument: " + key);
+    }
+  }
+  if (param.kmeans_clusters <= 0 || param.kmeans_max_iterations <= 0 ||
+      param.kmeans_threshold < 0.0)
+    throw std::runtime_error(
+        "K-means parameters must be positive (threshold may be zero)");
 
   int maxiter = 200;
 

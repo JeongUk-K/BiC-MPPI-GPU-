@@ -1,5 +1,8 @@
 #include "bi_mppi_gpu.cuh"
+#include "gpu_kmeans.cuh"
 #include "mppi_gpu.cuh"   // rollout_kernel 접근을 위해 포함
+#include "rollout_ee_export.cuh"
+#include "rollout_state_export.cuh"
 #include <algorithm>
 #include <cassert>
 #include <cmath>
@@ -253,6 +256,10 @@ void BiMPPI_GPU::init(BiMPPIParam p) {
     x_init = p.x_init; x_target = p.x_target;
     deviation_mu = p.deviation_mu; cost_mu = p.cost_mu; epsilon = p.epsilon;
     minpts = p.minpts; psi = p.psi;
+    clustering_method = p.clustering_method;
+    kmeans_clusters = p.kmeans_clusters;
+    kmeans_max_iterations = p.kmeans_max_iterations;
+    kmeans_threshold = p.kmeans_threshold;
 
     sigma_diag.resize(dim_u);
     for (int d = 0; d < dim_u; ++d) sigma_diag[d] = p.sigma_u(d,d);
@@ -270,6 +277,40 @@ void BiMPPI_GPU::init(BiMPPIParam p) {
 
     allocForward(); allocBackward(); allocGuide();
     alloc_Nf=Nf; alloc_Nb=Nb; alloc_Tf=Tf; alloc_Tb=Tb;
+}
+
+void BiMPPI_GPU::kmeansCluster(
+    std::vector<std::vector<int>>& clusters,
+    const Eigen::MatrixXd& feature_source, const Eigen::VectorXd& costs,
+    int sample_count) {
+    constexpr int kNumBlocks = 3;
+    Eigen::MatrixXd block_feature;
+    const Eigen::MatrixXd* feature_ptr = &feature_source;
+
+    const bool source_is_control_sequence =
+        feature_source.rows() == sample_count * dim_u &&
+        feature_source.cols() > 0;
+    if (source_is_control_sequence) {
+        const int time_steps = static_cast<int>(feature_source.cols());
+        block_feature = Eigen::MatrixXd::Zero(kNumBlocks * dim_u, sample_count);
+        for (int i = 0; i < sample_count; ++i) {
+            for (int block = 0; block < kNumBlocks; ++block) {
+                const int t0 = (block * time_steps) / kNumBlocks;
+                const int t1 = ((block + 1) * time_steps) / kNumBlocks;
+                const int length = std::max(1, t1 - t0);
+                for (int d = 0; d < dim_u; ++d) {
+                    double sum = 0.0;
+                    for (int t = t0; t < t1; ++t)
+                        sum += feature_source(i * dim_u + d, t);
+                    block_feature(block * dim_u + d, i) = sum / length;
+                }
+            }
+        }
+        feature_ptr = &block_feature;
+    }
+
+    runGPUKMeans(clusters, *feature_ptr, costs,
+                 {kmeans_clusters, kmeans_max_iterations, kmeans_threshold});
 }
 
 void BiMPPI_GPU::setCollisionChecker(CollisionChecker* cc) {
@@ -399,6 +440,11 @@ void BiMPPI_GPU::forwardRawRollout(Eigen::VectorXd &costs,
         ws_link_radius,ws_safe_margin,ws_hard_margin,
         Nf,dim_u,dim_x,Tf,(double)dt,gamma_u,model_type,true);
     CUDA_CHECK(cudaGetLastError()); CUDA_CHECK(cudaDeviceSynchronize());
+    rollout_ee_export::emit(rollout_ee_callback, "forward", d_Ufi, d_x_init,
+                            Nf, dim_u, dim_x, Tf, (double)dt, model_type);
+    rollout_state_export::emit(rollout_state_callback, "forward", d_Ufi,
+                               d_x_init, Nf, dim_u, dim_x, Tf, (double)dt,
+                               model_type);
     auto t1=std::chrono::high_resolution_clock::now();
     elapsed_rollout+=std::chrono::duration<double>(t1-t0).count();
 
@@ -425,6 +471,12 @@ void BiMPPI_GPU::backwardRawRollout(Eigen::VectorXd &costs,
         ws_link_radius,ws_safe_margin,ws_hard_margin,
         Nb,dim_u,dim_x,Tb,(double)dt,gamma_u,model_type);
     CUDA_CHECK(cudaGetLastError()); CUDA_CHECK(cudaDeviceSynchronize());
+    rollout_ee_export::emit(rollout_ee_callback, "backward", d_Ubi,
+                            d_x_target, Nb, dim_u, dim_x, Tb, (double)dt,
+                            model_type, true);
+    rollout_state_export::emit(rollout_state_callback, "backward", d_Ubi,
+                               d_x_target, Nb, dim_u, dim_x, Tb, (double)dt,
+                               model_type, true);
     auto t1=std::chrono::high_resolution_clock::now();
     elapsed_rollout+=std::chrono::duration<double>(t1-t0).count();
 
@@ -619,6 +671,11 @@ void BiMPPI_GPU::forwardRollout() {
         ws_link_radius,ws_safe_margin,ws_hard_margin,
         Nf,dim_u,dim_x,Tf,(double)dt,gamma_u,model_type,true);
     CUDA_CHECK(cudaGetLastError()); CUDA_CHECK(cudaDeviceSynchronize());
+    rollout_ee_export::emit(rollout_ee_callback, "forward", d_Ufi, d_x_init,
+                            Nf, dim_u, dim_x, Tf, (double)dt, model_type);
+    rollout_state_export::emit(rollout_state_callback, "forward", d_Ufi,
+                               d_x_init, Nf, dim_u, dim_x, Tf, (double)dt,
+                               model_type);
     auto t1=std::chrono::high_resolution_clock::now();
     elapsed_rollout+=std::chrono::duration<double>(t1-t0).count();
 
@@ -629,7 +686,10 @@ void BiMPPI_GPU::forwardRollout() {
     Eigen::MatrixXd Ui_f = flat_Ui_to_eigen(hUi, Nf, dim_u, Tf);
     appendVisRolloutSamples(Ui_f, Nf, Tf, false);
     clusters_f.clear();
-    dbscan(clusters_f, Ui_f, costs_f, Nf);
+    if (clustering_method == ClusteringMethod::KMeans)
+        kmeansCluster(clusters_f, Ui_f, costs_f, Nf);
+    else
+        dbscan(clusters_f, Ui_f, costs_f, Nf);
     if(clusters_f.empty()) clusters_f.push_back(full_cluster_f);
     calculateU(Uf,clusters_f,costs_f,Ui_f,Tf);
     Xf.resize(clusters_f.size()*dim_x,Tf+1);
@@ -659,6 +719,12 @@ void BiMPPI_GPU::backwardRollout() {
         ws_link_radius,ws_safe_margin,ws_hard_margin,
         Nb,dim_u,dim_x,Tb,(double)dt,gamma_u,model_type);
     CUDA_CHECK(cudaGetLastError()); CUDA_CHECK(cudaDeviceSynchronize());
+    rollout_ee_export::emit(rollout_ee_callback, "backward", d_Ubi,
+                            d_x_target, Nb, dim_u, dim_x, Tb, (double)dt,
+                            model_type, true);
+    rollout_state_export::emit(rollout_state_callback, "backward", d_Ubi,
+                               d_x_target, Nb, dim_u, dim_x, Tb, (double)dt,
+                               model_type, true);
     auto t1=std::chrono::high_resolution_clock::now();
     elapsed_rollout+=std::chrono::duration<double>(t1-t0).count();
 
@@ -669,7 +735,10 @@ void BiMPPI_GPU::backwardRollout() {
     Eigen::MatrixXd Ui_b = flat_Ui_to_eigen(hUi, Nb, dim_u, Tb);
     appendVisRolloutSamples(Ui_b, Nb, Tb, true);
     clusters_b.clear();
-    dbscan(clusters_b, Ui_b, costs_b, Nb);
+    if (clustering_method == ClusteringMethod::KMeans)
+        kmeansCluster(clusters_b, Ui_b, costs_b, Nb);
+    else
+        dbscan(clusters_b, Ui_b, costs_b, Nb);
     if(clusters_b.empty()) clusters_b.push_back(full_cluster_b);
     calculateU(Ub,clusters_b,costs_b,Ui_b,Tb);
     Xb.resize(clusters_b.size()*dim_x,Tb+1);
@@ -764,6 +833,14 @@ void BiMPPI_GPU::guideMPPI() {
             ws_link_radius,ws_safe_margin,ws_hard_margin,
             Nr,dim_u,dim_x,Tr,(double)dt,gamma_u,model_type);
         CUDA_CHECK(cudaGetLastError()); CUDA_CHECK(cudaDeviceSynchronize());
+        rollout_ee_export::emit(rollout_ee_callback,
+                                "guide_" + std::to_string(r), d_Uri,
+                                d_x_init, Nr, dim_u, dim_x, Tr, (double)dt,
+                                model_type);
+        rollout_state_export::emit(rollout_state_callback,
+                                   "guide_" + std::to_string(r), d_Uri,
+                                   d_x_init, Nr, dim_u, dim_x, Tr, (double)dt,
+                                   model_type);
         std::vector<double> hcr(Nr),hri((size_t)Nr*dim_u*Tr);
         CUDA_CHECK(cudaMemcpy(hcr.data(),d_costs_r,Nr*sizeof(double),cudaMemcpyDeviceToHost));
         CUDA_CHECK(cudaMemcpy(hri.data(),d_Uri,(size_t)Nr*dim_u*Tr*sizeof(double),cudaMemcpyDeviceToHost));

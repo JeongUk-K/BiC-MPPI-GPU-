@@ -5,6 +5,8 @@
 #include "mppi_vis_logger.h"
 #include "model_base.h"
 #include "mppi_param.h"
+#include "rollout_ee_callback.h"
+#include "rollout_state_callback.h"
 
 #include <Eigen/Dense>
 #include <chrono>
@@ -36,6 +38,12 @@ public:
   void guideReference(const Eigen::MatrixXd &Uref,
                       const Eigen::MatrixXd &Xref);
   void setVisLogger(MPPIVisLogger *logger) { vis_logger = logger; }
+  void setRolloutEECallback(RolloutEEBatchCallback callback) {
+    rollout_ee_callback = std::move(callback);
+  }
+  void setRolloutStateCallback(RolloutStateBatchCallback callback) {
+    rollout_state_callback = std::move(callback);
+  }
 
   // ---- Public state (mirrors CPU BiMPPI) ----
   Eigen::MatrixXd U_f0; // dim_u x Tf
@@ -63,9 +71,15 @@ protected:
   double deviation_mu, cost_mu, epsilon;
   int minpts;
   double psi;
+  ClusteringMethod clustering_method = ClusteringMethod::DBSCAN;
+  int kmeans_clusters = 5;
+  int kmeans_max_iterations = 100;
+  double kmeans_threshold = 1e-6;
 
   CollisionChecker *collision_checker;
   MPPIVisLogger *vis_logger = nullptr;
+  RolloutEEBatchCallback rollout_ee_callback;
+  RolloutStateBatchCallback rollout_state_callback;
 
   // CPU cluster data
   std::vector<std::vector<int>> clusters_f, clusters_b;
@@ -130,6 +144,9 @@ protected:
   void dbscan(std::vector<std::vector<int>> &clusters,
               const Eigen::MatrixXd &Di, const Eigen::VectorXd &costs,
               int N_samples);
+  void kmeansCluster(std::vector<std::vector<int>> &clusters,
+                     const Eigen::MatrixXd &feature_source,
+                     const Eigen::VectorXd &costs, int N_samples);
   void calculateU(Eigen::MatrixXd &Uout,
                   const std::vector<std::vector<int>> &clusters,
                   const Eigen::VectorXd &costs, const Eigen::MatrixXd &Ui_cpu,

@@ -11,17 +11,20 @@
 #include <array>
 #include <algorithm>
 #include <chrono>
+#include <cstdlib>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <limits>
+#include <memory>
 #include <sstream>
 #include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
+#include <zstd.h>
 
 namespace manipulator_random_pose_benchmark {
 
@@ -37,6 +40,10 @@ struct RandomPoseBenchmarkSolverParams {
     int reverse_samples = 1024;
     double gamma_u = 0.0015;
     JointNoiseSigma sigma = {4.5, 4.5, 3.8, 2.2, 1.8, 1.2};
+    ClusteringMethod clustering_method = ClusteringMethod::DBSCAN;
+    int kmeans_clusters = 5;
+    int kmeans_max_iterations = 100;
+    double kmeans_threshold = 1e-6;
 
     double cluster_deviation_mu = 1.0;
     double cluster_epsilon = 3.8;
@@ -73,6 +80,7 @@ inline RandomPoseBenchmarkSolverParams randomPoseSolverParams() {
   params.clustermppi.cluster_deviation_mu = 1.0;
   params.clustermppi.cluster_epsilon = 3.8;
   params.clustermppi.cluster_minpts = 8;
+  params.clustermppi.clustering_method = ClusteringMethod::KMeans;
 
   params.bicmppi.dt = 0.02f;
   params.bicmppi.forward_horizon = 45;
@@ -87,6 +95,7 @@ inline RandomPoseBenchmarkSolverParams randomPoseSolverParams() {
   params.bicmppi.bic_epsilon = 3.8;
   params.bicmppi.bic_minpts = 8;
   params.bicmppi.bic_psi = 0.0;
+  params.bicmppi.clustering_method = ClusteringMethod::KMeans;
 
   return params;
 }
@@ -111,8 +120,59 @@ struct BenchmarkConfig {
   double warm_start_kp = 18.0;
   double warm_start_kd = 7.0;
 
-  std::string output_root = "../random_pose_benchmark/results";
+  std::string output_root = "../result/manipulator";
+  bool save_rollout_ee = true;
+  bool save_rollout_state = false;
+  std::vector<int> selected_scenario_ids;
 };
+
+inline BenchmarkConfig benchmarkConfigFromEnvironment() {
+  BenchmarkConfig config;
+  if (const char *value = std::getenv("MANIPULATOR_BENCHMARK_SCENARIOS")) {
+    config.scenario_count = std::stoi(value);
+  }
+  if (const char *value = std::getenv("MANIPULATOR_BENCHMARK_MAX_ITER")) {
+    config.max_iter = std::stoi(value);
+  }
+  if (const char *value = std::getenv("MANIPULATOR_BENCHMARK_OUTPUT")) {
+    config.output_root = value;
+  }
+  if (const char *value = std::getenv("MANIPULATOR_BENCHMARK_SAVE_EE")) {
+    config.save_rollout_ee = std::string(value) != "0";
+  }
+  if (const char *value = std::getenv("MANIPULATOR_BENCHMARK_SAVE_STATE")) {
+    config.save_rollout_state = std::string(value) != "0";
+  }
+  if (const char *value =
+          std::getenv("MANIPULATOR_BENCHMARK_SCENARIO_IDS")) {
+    std::stringstream stream(value);
+    std::string token;
+    while (std::getline(stream, token, ',')) {
+      if (!token.empty()) config.selected_scenario_ids.push_back(std::stoi(token));
+    }
+    std::sort(config.selected_scenario_ids.begin(),
+              config.selected_scenario_ids.end());
+    if (std::adjacent_find(config.selected_scenario_ids.begin(),
+                           config.selected_scenario_ids.end()) !=
+        config.selected_scenario_ids.end()) {
+      throw std::runtime_error("duplicate MANIPULATOR_BENCHMARK_SCENARIO_IDS");
+    }
+  }
+  if (config.scenario_count <= 0 ||
+      config.scenario_count > BenchmarkConfig::kReferencePoseCount *
+                                  (BenchmarkConfig::kReferencePoseCount - 1)) {
+    throw std::runtime_error("invalid MANIPULATOR_BENCHMARK_SCENARIOS");
+  }
+  if (config.max_iter <= 0) {
+    throw std::runtime_error("invalid MANIPULATOR_BENCHMARK_MAX_ITER");
+  }
+  for (int id : config.selected_scenario_ids) {
+    if (id < 0 || id >= config.scenario_count) {
+      throw std::runtime_error("invalid MANIPULATOR_BENCHMARK_SCENARIO_IDS");
+    }
+  }
+  return config;
+}
 
 struct BenchmarkScenario {
   int index = -1;
@@ -190,10 +250,202 @@ inline std::filesystem::path trajectoryPath(const BenchmarkConfig &config,
          (scenarioTag(scenario_index) + "_executed_x.csv");
 }
 
+inline std::filesystem::path rolloutEEPath(const BenchmarkConfig &config,
+                                           const std::string &solver_key,
+                                           int scenario_index) {
+  return rootPath(config) / "rollout_ee" / solver_key /
+         (scenarioTag(scenario_index) + "_ee_packed.bin.zst");
+}
+
+inline std::filesystem::path rolloutEEIndexPath(const BenchmarkConfig &config,
+                                                const std::string &solver_key,
+                                                int scenario_index) {
+  return rootPath(config) / "rollout_ee" / solver_key /
+         (scenarioTag(scenario_index) + "_index.csv");
+}
+
+inline std::filesystem::path rolloutStatePath(const BenchmarkConfig &config,
+                                              const std::string &solver_key,
+                                              int scenario_index) {
+  return rootPath(config) / "rollout_state" / solver_key /
+         (scenarioTag(scenario_index) + "_state_f16.bin.zst");
+}
+
+inline std::filesystem::path rolloutStateIndexPath(
+    const BenchmarkConfig &config, const std::string &solver_key,
+    int scenario_index) {
+  return rootPath(config) / "rollout_state" / solver_key /
+         (scenarioTag(scenario_index) + "_index.csv");
+}
+
+class RolloutEEWriter {
+ public:
+  RolloutEEWriter(const std::filesystem::path &data_path,
+                  const std::filesystem::path &index_path)
+      : data_(data_path, std::ios::binary), index_(index_path) {
+    if (!data_ || !index_) {
+      throw std::runtime_error("failed to open rollout EE output files");
+    }
+    context_ = ZSTD_createCCtx();
+    if (!context_) throw std::runtime_error("failed to create Zstd context");
+    checkZstd(ZSTD_CCtx_setParameter(context_, ZSTD_c_compressionLevel, 3));
+    checkZstd(ZSTD_CCtx_setParameter(context_, ZSTD_c_checksumFlag, 1));
+    output_buffer_.resize(ZSTD_CStreamOutSize());
+    index_ << "iteration,batch,branch,rollout_count,point_count,dtype,"
+              "coordinate_scale_m,layout,uncompressed_offset_bytes,"
+              "uncompressed_bytes\n";
+  }
+
+  RolloutEEWriter(const RolloutEEWriter &) = delete;
+  RolloutEEWriter &operator=(const RolloutEEWriter &) = delete;
+
+  ~RolloutEEWriter() {
+    if (context_) {
+      try {
+        finish();
+      } catch (...) {
+      }
+      ZSTD_freeCCtx(context_);
+    }
+  }
+
+  void setIteration(int iteration) {
+    iteration_ = iteration;
+    batch_ = 0;
+  }
+
+  void append(const std::string &branch,
+              const std::vector<std::uint8_t> &positions,
+              int rollout_count, int point_count) {
+    const std::size_t byte_count = positions.size();
+    index_ << iteration_ << ',' << batch_++ << ',' << branch << ','
+           << rollout_count << ',' << point_count
+           << ",mixed-i16-i8,0.001,delta-packed-rollout-time-xyz,"
+           << uncompressed_offset_ << ','
+           << byte_count << '\n';
+
+    ZSTD_inBuffer input{positions.data(), byte_count, 0};
+    while (input.pos < input.size) {
+      ZSTD_outBuffer output{output_buffer_.data(), output_buffer_.size(), 0};
+      checkZstd(ZSTD_compressStream2(context_, &output, &input,
+                                    ZSTD_e_continue));
+      data_.write(output_buffer_.data(),
+                  static_cast<std::streamsize>(output.pos));
+      if (!data_) throw std::runtime_error("failed to write rollout EE data");
+    }
+    uncompressed_offset_ += byte_count;
+  }
+
+ private:
+  static void checkZstd(std::size_t code) {
+    if (ZSTD_isError(code)) {
+      throw std::runtime_error(std::string("Zstd error: ") +
+                               ZSTD_getErrorName(code));
+    }
+  }
+
+  void finish() {
+    if (finished_) return;
+    ZSTD_inBuffer input{nullptr, 0, 0};
+    std::size_t remaining = 1;
+    while (remaining != 0) {
+      ZSTD_outBuffer output{output_buffer_.data(), output_buffer_.size(), 0};
+      remaining = ZSTD_compressStream2(context_, &output, &input, ZSTD_e_end);
+      checkZstd(remaining);
+      data_.write(output_buffer_.data(),
+                  static_cast<std::streamsize>(output.pos));
+    }
+    data_.flush();
+    index_.flush();
+    finished_ = true;
+  }
+
+  std::ofstream data_;
+  std::ofstream index_;
+  ZSTD_CCtx *context_ = nullptr;
+  std::vector<char> output_buffer_;
+  std::uint64_t uncompressed_offset_ = 0;
+  int iteration_ = -1;
+  int batch_ = 0;
+  bool finished_ = false;
+};
+
+class RolloutStateWriter {
+ public:
+  RolloutStateWriter(const std::filesystem::path &data_path,
+                     const std::filesystem::path &index_path)
+      : data_(data_path, std::ios::binary), index_(index_path) {
+    if (!data_ || !index_) {
+      throw std::runtime_error("failed to open rollout state output files");
+    }
+    context_ = ZSTD_createCCtx();
+    if (!context_) throw std::runtime_error("failed to create Zstd context");
+    index_ << "iteration,batch,branch,rollout_count,point_count,state_dim,"
+              "dtype,layout,compressed_offset_bytes,compressed_bytes,"
+              "uncompressed_offset_bytes,uncompressed_bytes\n";
+  }
+
+  RolloutStateWriter(const RolloutStateWriter &) = delete;
+  RolloutStateWriter &operator=(const RolloutStateWriter &) = delete;
+
+  ~RolloutStateWriter() {
+    if (context_) ZSTD_freeCCtx(context_);
+  }
+
+  void setIteration(int iteration) {
+    iteration_ = iteration;
+    batch_ = 0;
+  }
+
+  void append(const std::string &branch,
+              const std::vector<std::uint16_t> &states,
+              int rollout_count, int point_count, int state_dim) {
+    const std::size_t byte_count = states.size() * sizeof(std::uint16_t);
+    output_buffer_.resize(ZSTD_compressBound(byte_count));
+    checkZstd(ZSTD_CCtx_setParameter(context_, ZSTD_c_compressionLevel, 3));
+    checkZstd(ZSTD_CCtx_setParameter(context_, ZSTD_c_checksumFlag, 1));
+    const std::size_t compressed_bytes =
+        ZSTD_compress2(context_, output_buffer_.data(), output_buffer_.size(),
+                       states.data(), byte_count);
+    checkZstd(compressed_bytes);
+    index_ << iteration_ << ',' << batch_++ << ',' << branch << ','
+           << rollout_count << ',' << point_count << ',' << state_dim
+           << ",float16,rollout-time-state," << compressed_offset_ << ','
+           << compressed_bytes << ',' << uncompressed_offset_ << ','
+           << byte_count << '\n';
+    data_.write(output_buffer_.data(),
+                static_cast<std::streamsize>(compressed_bytes));
+    if (!data_) throw std::runtime_error("failed to write rollout state data");
+    compressed_offset_ += compressed_bytes;
+    uncompressed_offset_ += byte_count;
+  }
+
+ private:
+  static void checkZstd(std::size_t code) {
+    if (ZSTD_isError(code)) {
+      throw std::runtime_error(std::string("Zstd error: ") +
+                               ZSTD_getErrorName(code));
+    }
+  }
+
+  std::ofstream data_;
+  std::ofstream index_;
+  ZSTD_CCtx *context_ = nullptr;
+  std::vector<char> output_buffer_;
+  std::uint64_t compressed_offset_ = 0;
+  std::uint64_t uncompressed_offset_ = 0;
+  int iteration_ = -1;
+  int batch_ = 0;
+};
+
 inline void ensureOutputDirectories(const BenchmarkConfig &config,
                                     const std::string &solver_key) {
   std::filesystem::create_directories(rootPath(config));
   std::filesystem::create_directories(rootPath(config) / "trajectories" /
+                                      solver_key);
+  std::filesystem::create_directories(rootPath(config) / "rollout_ee" /
+                                      solver_key);
+  std::filesystem::create_directories(rootPath(config) / "rollout_state" /
                                       solver_key);
 }
 
@@ -317,7 +569,9 @@ inline std::vector<BenchmarkScenario> makeBenchmarkScenarios(
       scenario.direct_path_blocked =
           directJointPathBlocked(model, x_init, x_goal);
       scenarios.push_back(scenario);
+      if (static_cast<int>(scenarios.size()) == config.scenario_count) break;
     }
+    if (static_cast<int>(scenarios.size()) == config.scenario_count) break;
   }
 
   if (static_cast<int>(scenarios.size()) != config.scenario_count) {
@@ -325,6 +579,24 @@ inline std::vector<BenchmarkScenario> makeBenchmarkScenarios(
                              "pose-pair benchmark scenario set");
   }
   return scenarios;
+}
+
+inline std::vector<BenchmarkScenario> selectBenchmarkScenarios(
+    const std::vector<BenchmarkScenario> &scenarios,
+    const BenchmarkConfig &config) {
+  if (config.selected_scenario_ids.empty()) return scenarios;
+  std::vector<BenchmarkScenario> selected;
+  selected.reserve(config.selected_scenario_ids.size());
+  for (int id : config.selected_scenario_ids) {
+    const auto found = std::find_if(
+        scenarios.begin(), scenarios.end(),
+        [id](const BenchmarkScenario &scenario) { return scenario.index == id; });
+    if (found == scenarios.end()) {
+      throw std::runtime_error("selected benchmark scenario was not generated");
+    }
+    selected.push_back(*found);
+  }
+  return selected;
 }
 
 inline void writeScenarioCsv(const BenchmarkConfig &config,
@@ -493,7 +765,9 @@ BenchmarkResult executeForwardScenario(
     const Eigen::VectorXd &x_goal, const Eigen::VectorXd &x_waypoint,
     const MPPIParam &param,
     const std::string &solver_key, const std::string &solver_label,
-    const std::filesystem::path &trajectory_csv) {
+    const std::filesystem::path &trajectory_csv,
+    RolloutEEWriter *rollout_ee_writer,
+    RolloutStateWriter *rollout_state_writer) {
   constexpr int dof = ManipulatorDynamicsModel::kDof;
 
   Eigen::MatrixXd executed_x =
@@ -509,6 +783,8 @@ BenchmarkResult executeForwardScenario(
 
   const auto wall_start = std::chrono::steady_clock::now();
   for (int iter = 0; iter < config.max_iter; ++iter) {
+    if (rollout_ee_writer) rollout_ee_writer->setIteration(iter);
+    if (rollout_state_writer) rollout_state_writer->setIteration(iter);
     solver.solve();
     ++solve_iterations;
     total_solver_elapsed += solver.elapsed;
@@ -598,11 +874,12 @@ int runForwardBenchmark(const std::string &solver_key,
                         const std::string &solver_label,
                         const SolverParams &solver_params,
                         ConfigureSolver configure_solver) {
-  BenchmarkConfig config;
+  BenchmarkConfig config = benchmarkConfigFromEnvironment();
   ManipulatorDynamicsModel model;
   configureWorkspaceModel(model, config);
 
-  const auto scenarios = makeBenchmarkScenarios(model, config);
+  const auto scenarios = selectBenchmarkScenarios(
+      makeBenchmarkScenarios(model, config), config);
   ensureOutputDirectories(config, solver_key);
   writeScenarioCsv(config, model, scenarios);
 
@@ -630,6 +907,10 @@ int runForwardBenchmark(const std::string &solver_key,
     param.x_init = x_init;
     param.x_target = x_goal;
     param.sigma_u = makeSigmaMatrix(solver_params.sigma);
+    param.clustering_method = solver_params.clustering_method;
+    param.kmeans_clusters = solver_params.kmeans_clusters;
+    param.kmeans_max_iterations = solver_params.kmeans_max_iterations;
+    param.kmeans_threshold = solver_params.kmeans_threshold;
 
     CollisionChecker cc = makeWorkspaceCollisionChecker(model, scenario.obstacle);
     Solver solver(model);
@@ -643,9 +924,37 @@ int runForwardBenchmark(const std::string &solver_key,
 
     const std::filesystem::path traj_path =
         trajectoryPath(config, solver_key, scenario.index);
+    std::unique_ptr<RolloutEEWriter> rollout_ee_writer;
+    std::unique_ptr<RolloutStateWriter> rollout_state_writer;
+    if (config.save_rollout_ee) {
+      rollout_ee_writer = std::make_unique<RolloutEEWriter>(
+          rolloutEEPath(config, solver_key, scenario.index),
+          rolloutEEIndexPath(config, solver_key, scenario.index));
+      solver.setRolloutEECallback(
+          [&rollout_ee_writer](const std::string &branch,
+                              const std::vector<std::uint8_t> &positions,
+                              int rollout_count, int point_count) {
+            rollout_ee_writer->append(branch, positions, rollout_count,
+                                      point_count);
+          });
+    }
+    if (config.save_rollout_state) {
+      rollout_state_writer = std::make_unique<RolloutStateWriter>(
+          rolloutStatePath(config, solver_key, scenario.index),
+          rolloutStateIndexPath(config, solver_key, scenario.index));
+      solver.setRolloutStateCallback(
+          [&rollout_state_writer](const std::string &branch,
+                                 const std::vector<std::uint16_t> &states,
+                                 int rollout_count, int point_count,
+                                 int state_dim) {
+            rollout_state_writer->append(branch, states, rollout_count,
+                                         point_count, state_dim);
+          });
+    }
     const BenchmarkResult result = executeForwardScenario(
         solver, model, config, scenario, x_goal, x_waypoint, param, solver_key,
-        solver_label, traj_path);
+        solver_label, traj_path, rollout_ee_writer.get(),
+        rollout_state_writer.get());
     writeStatsRow(stats, result);
 
     std::cout << solver_label << " " << scenarioTag(scenario.index)
@@ -669,7 +978,9 @@ BenchmarkResult executeBidirectionalScenario(
     const Eigen::VectorXd &x_goal, const Eigen::VectorXd &x_waypoint,
     const BiMPPIParam &param,
     const std::string &solver_key, const std::string &solver_label,
-    const std::filesystem::path &trajectory_csv) {
+    const std::filesystem::path &trajectory_csv,
+    RolloutEEWriter *rollout_ee_writer,
+    RolloutStateWriter *rollout_state_writer) {
   constexpr int dof = ManipulatorDynamicsModel::kDof;
 
   Eigen::MatrixXd executed_x =
@@ -685,6 +996,8 @@ BenchmarkResult executeBidirectionalScenario(
 
   const auto wall_start = std::chrono::steady_clock::now();
   for (int iter = 0; iter < config.max_iter; ++iter) {
+    if (rollout_ee_writer) rollout_ee_writer->setIteration(iter);
+    if (rollout_state_writer) rollout_state_writer->setIteration(iter);
     solver.solve();
     ++solve_iterations;
     total_solver_elapsed += solver.elapsed;
@@ -777,11 +1090,12 @@ template <typename Solver>
 int runBidirectionalBenchmark(const std::string &solver_key,
                               const std::string &solver_label,
                               const SolverParams &solver_params) {
-  BenchmarkConfig config;
+  BenchmarkConfig config = benchmarkConfigFromEnvironment();
   ManipulatorDynamicsModel model;
   configureWorkspaceModel(model, config);
 
-  const auto scenarios = makeBenchmarkScenarios(model, config);
+  const auto scenarios = selectBenchmarkScenarios(
+      makeBenchmarkScenarios(model, config), config);
   ensureOutputDirectories(config, solver_key);
   writeScenarioCsv(config, model, scenarios);
 
@@ -817,6 +1131,10 @@ int runBidirectionalBenchmark(const std::string &solver_key,
     param.epsilon = solver_params.bic_epsilon;
     param.minpts = solver_params.bic_minpts;
     param.psi = solver_params.bic_psi;
+    param.clustering_method = solver_params.clustering_method;
+    param.kmeans_clusters = solver_params.kmeans_clusters;
+    param.kmeans_max_iterations = solver_params.kmeans_max_iterations;
+    param.kmeans_threshold = solver_params.kmeans_threshold;
 
     CollisionChecker cc = makeWorkspaceCollisionChecker(model, scenario.obstacle);
     Solver solver(model);
@@ -832,9 +1150,37 @@ int runBidirectionalBenchmark(const std::string &solver_key,
 
     const std::filesystem::path traj_path =
         trajectoryPath(config, solver_key, scenario.index);
+    std::unique_ptr<RolloutEEWriter> rollout_ee_writer;
+    std::unique_ptr<RolloutStateWriter> rollout_state_writer;
+    if (config.save_rollout_ee) {
+      rollout_ee_writer = std::make_unique<RolloutEEWriter>(
+          rolloutEEPath(config, solver_key, scenario.index),
+          rolloutEEIndexPath(config, solver_key, scenario.index));
+      solver.setRolloutEECallback(
+          [&rollout_ee_writer](const std::string &branch,
+                              const std::vector<std::uint8_t> &positions,
+                              int rollout_count, int point_count) {
+            rollout_ee_writer->append(branch, positions, rollout_count,
+                                      point_count);
+          });
+    }
+    if (config.save_rollout_state) {
+      rollout_state_writer = std::make_unique<RolloutStateWriter>(
+          rolloutStatePath(config, solver_key, scenario.index),
+          rolloutStateIndexPath(config, solver_key, scenario.index));
+      solver.setRolloutStateCallback(
+          [&rollout_state_writer](const std::string &branch,
+                                 const std::vector<std::uint16_t> &states,
+                                 int rollout_count, int point_count,
+                                 int state_dim) {
+            rollout_state_writer->append(branch, states, rollout_count,
+                                         point_count, state_dim);
+          });
+    }
     const BenchmarkResult result = executeBidirectionalScenario(
         solver, model, config, scenario, x_goal, x_waypoint, param, solver_key,
-        solver_label, traj_path);
+        solver_label, traj_path, rollout_ee_writer.get(),
+        rollout_state_writer.get());
     writeStatsRow(stats, result);
 
     std::cout << solver_label << " " << scenarioTag(scenario.index)

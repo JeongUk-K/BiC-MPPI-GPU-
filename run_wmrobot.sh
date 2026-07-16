@@ -22,13 +22,14 @@ usage() {
 Usage:
   ./run_wmrobot.sh [options] [-- solver args]
 
-WMRobot GPU examples.  Outputs include raw CSVs, aggregate timing/success CSV,
-and rollout/cluster `vis_data` when the selected scenario emits it.
+Build and run every `src/wmrobot/gpu/*.cpp` example. Outputs include per-example
+logs, raw CSVs, aggregate timing/success CSV, and rollout/cluster `vis_data`.
 
 Options:
   --scenario NAME       basic or map_285. Default: basic
-  --solver NAME         all, mppi, log_mppi, cluster_mppi, bi_mppi, svgd_mppi.
-                        `map_285` supports all except svgd_mppi. Default: all
+  --solver NAME         all or a source basename such as mppi, log_mppi,
+                        cluster_mppi, cluster_mppi_kmeans, bi_mppi,
+                        bi_mppi_kmeans. Default: all
   --out DIR             Output directory. Default: results/wmrobot
   --overwrite           Replace output directory.
   --no-build            Use existing build/gpu binaries.
@@ -43,7 +44,8 @@ Examples:
   ./run_wmrobot.sh --scenario basic --solver all
   ./run_wmrobot.sh --scenario map_285 --overwrite
 
-Arguments after `--` are forwarded to basic-scenario executables.
+Arguments after `--` are forwarded to every selected basic executable, so use
+only options supported by all selected examples (for example --smoke).
 EOF
 }
 
@@ -88,22 +90,31 @@ run_basic() {
     local out="$1"
     [[ "$DO_BUILD" -eq 1 ]] && bash "$REPO_ROOT/build_gpu.sh" wmrobot
     reset_build_outputs
+    # Keep every aggregate tied to this invocation. Without this cleanup, CSVs
+    # from examples removed or disabled since the previous run remain in
+    # raw_csv and are incorrectly included in the new statistics.
+    rm -rf "$out/logs" "$out/raw_csv" "$out/vis_data"
+    rm -f "$out/aggregate_timing_success.csv" \
+          "$out/outputs_manifest.csv" \
+          "$out/visualization_data_notes.md"
+    mkdir -p "$out/logs"
 
-    local specs=(
-        "mppi:wmrobot_mppi"
-        "log_mppi:wmrobot_log_mppi"
-        "cluster_mppi:wmrobot_cluster_mppi"
-        "bi_mppi:wmrobot_bi_mppi"
-        # "svgd_mppi:wmrobot_svgd_mppi"
-    )
     local ran=0
-    for spec in "${specs[@]}"; do
-        local name="${spec%%:*}"
-        local exe="${spec#*:}"
+    local src stem name exe
+    for src in "$REPO_ROOT"/src/wmrobot/gpu/*.cpp; do
+        stem="$(basename "${src%.cpp}")"
+        if [[ "$stem" == "bi_mppi_SE(2)" ]]; then
+            name="bi_mppi_se2"
+            exe="wmrobot_bi_mppi_se2"
+        else
+            name="$stem"
+            exe="wmrobot_$stem"
+        fi
         solver_enabled "$name" || continue
         [[ -x "$GPU_DIR/$exe" ]] || { echo "ERROR: missing executable: $GPU_DIR/$exe" >&2; exit 1; }
         echo "[run] $exe"
-        (cd "$BUILD_DIR" && "./gpu/$exe" "${RUN_ARGS[@]}")
+        (cd "$BUILD_DIR" && "./gpu/$exe" "${RUN_ARGS[@]}") \
+            2>&1 | tee "$out/logs/$name.log"
         ran=1
     done
     [[ "$ran" -eq 1 ]] || { echo "ERROR: no solver matched --solver $SOLVER" >&2; exit 1; }

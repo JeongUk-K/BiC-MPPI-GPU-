@@ -1,16 +1,14 @@
 function visualize_manipulator_reference_poses_matlab()
 %VISUALIZE_MANIPULATOR_REFERENCE_POSES_MATLAB
 % Visualize the 16 joint-space reference poses used by the manipulator
-% random-pose benchmark. The primary rendering path uses MathWorks Robotics
-% System Toolbox rigidBodyTree + rigidBody/addVisual. The attached visual
-% geometry is a capsule approximation built from the same DH chain used by the
-% C++ model.
+% random-pose benchmark on the MathWorks predefined Universal Robots UR5
+% model.
 %
-% The kinematic chain matches ManipulatorDynamicsModel:
-%   standard DH, approximately RB5-like
-%   a     = [0, -0.427, -0.357, 0, 0, 0]
-%   d     = [0.15, 0, 0, 0.11, 0.09, 0.09]
-%   alpha = [pi/2, 0, 0, pi/2, -pi/2, 0]
+% The benchmark poses are 6-DOF joint postures [rad]. For the MATLAB UR5 URDF
+% convention, joint 1 is shifted by pi to align the base direction with the
+% benchmark DH convention:
+%   ur5 = loadrobot('universalUR5', 'DataFormat', 'row');
+%   show(ur5, benchmarkPoseToUr5Configuration(q));
 %
 % Usage from MATLAB:
 %   cd /home/cora-tuf/MPPI/BiC-MPPI-legacy/random_pose_benchmark
@@ -29,32 +27,38 @@ labelFontSize = 7;
 tickFontSize = 7;
 
 robot = [];
-if hasRoboticsSystemToolbox()
-    robot = buildRigidBodyTree(dh);
+if hasLoadrobot()
+    try
+        robot = loadUniversalUR5Robot();
+    catch ME
+        warning(['Could not load MathWorks predefined Universal UR5 model: %s\n', ...
+                 'Using the local DH skeleton plot only.'], ME.message);
+    end
 else
-    warning(['Robotics System Toolbox rigidBodyTree was not found. ', ...
+    warning(['Robotics System Toolbox loadrobot was not found. ', ...
              'Using the local DH skeleton plot only.']);
 end
 
-fig = figure('Name', 'Manipulator Reference Poses', ...
+fig = figure('Name', 'Universal UR5 Reference Poses', ...
              'Color', 'w', ...
              'Position', figurePosition);
 
 for i = 1:size(poses, 1)
     figure(fig);
     ax = subplot(4, 4, i);
-    q = poses(i, :);
+    benchmarkQ = poses(i, :);
 
     shownWithToolbox = false;
     if ~isempty(robot)
-        shownWithToolbox = showRigidBodyTree(ax, robot, q);
+        ur5Q = benchmarkPoseToUr5Configuration(benchmarkQ);
+        shownWithToolbox = showRigidBodyTree(ax, robot, ur5Q);
     end
 
     hold(ax, 'on');
     if ~shownWithToolbox
-        plotRigidBodyGeometry(ax, q, dh);
+        plotRigidBodyGeometry(ax, benchmarkQ, dh);
+        plotDhCenterline(ax, benchmarkQ, dh);
     end
-    plotDhCenterline(ax, q, dh);
     hold(ax, 'off');
 
     title(ax, sprintf('%02d  %s', ids(i), names{i}), ...
@@ -77,14 +81,32 @@ outDir = fullfile(fileparts(mfilename('fullpath')), 'results');
 if ~exist(outDir, 'dir')
     mkdir(outDir);
 end
-outPng = fullfile(outDir, 'manipulator_reference_poses_matlab.png');
+outPng = fullfile(outDir, 'manipulator_reference_poses_matlab_ur5.png');
 saveFigurePng(fig, outPng);
 fprintf('Saved figure: %s\n', outPng);
 
 end
 
-function tf = hasRoboticsSystemToolbox()
-tf = exist('rigidBodyTree', 'class') == 8 || exist('rigidBodyTree', 'file') == 2;
+function tf = hasLoadrobot()
+tf = exist('loadrobot', 'file') == 2;
+end
+
+function robot = loadUniversalUR5Robot()
+robot = loadrobot('universalUR5', 'DataFormat', 'row');
+numJoints = numel(homeConfiguration(robot));
+if numJoints ~= 6
+    error('Expected universalUR5 to have 6 non-fixed joints, but got %d.', numJoints);
+end
+end
+
+function ur5Q = benchmarkPoseToUr5Configuration(benchmarkQ)
+ur5Q = benchmarkQ;
+ur5Q(1) = ur5Q(1) + pi;
+ur5Q = wrapToPiLocal(ur5Q);
+end
+
+function q = wrapToPiLocal(q)
+q = mod(q + pi, 2.0 * pi) - pi;
 end
 
 function adjustSubplotPosition(ax, widthScale, heightScale)

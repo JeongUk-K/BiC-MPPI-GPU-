@@ -1,4 +1,6 @@
 #include "log_mppi_gpu.cuh"
+#include "rollout_ee_export.cuh"
+#include "rollout_state_export.cuh"
 
 #include <algorithm>
 #include <cmath>
@@ -74,6 +76,12 @@ void LogMPPI_GPU::solve() {
       ws_safe_margin, ws_hard_margin, N, dim_u, dim_x, T,
       static_cast<double>(dt), gamma_u, model_type, false);
   CUDA_CHECK(cudaGetLastError());
+
+  rollout_ee_export::emit(rollout_ee_callback, "forward", d_Ui, d_x_init, N,
+                          dim_u, dim_x, T, static_cast<double>(dt), model_type);
+  rollout_state_export::emit(rollout_state_callback, "forward", d_Ui,
+                             d_x_init, N, dim_u, dim_x, T,
+                             static_cast<double>(dt), model_type);
 
   std::vector<double> h_costs(N);
   CUDA_CHECK(cudaMemcpy(h_costs.data(), d_costs,

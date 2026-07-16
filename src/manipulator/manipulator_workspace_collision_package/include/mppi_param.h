@@ -1,6 +1,24 @@
 #pragma once
 
 #include <Eigen/Dense>
+#include <stdexcept>
+#include <string>
+
+enum class ClusteringMethod {
+  DBSCAN,
+  KMeans,
+};
+
+inline ClusteringMethod parseClusteringMethod(const std::string &value) {
+  if (value == "dbscan") return ClusteringMethod::DBSCAN;
+  if (value == "kmeans") return ClusteringMethod::KMeans;
+  throw std::invalid_argument(
+      "clustering method must be either 'dbscan' or 'kmeans'");
+}
+
+inline const char *clusteringMethodName(ClusteringMethod method) {
+  return method == ClusteringMethod::KMeans ? "kmeans" : "dbscan";
+}
 
 struct MPPIParam {
   float dt = 0.02f;
@@ -13,6 +31,10 @@ struct MPPIParam {
   Eigen::VectorXd x_init;
   Eigen::VectorXd x_target;
   Eigen::MatrixXd sigma_u;
+  ClusteringMethod clustering_method = ClusteringMethod::DBSCAN;
+  int kmeans_clusters = 5;
+  int kmeans_max_iterations = 100;
+  double kmeans_threshold = 1e-6;
 };
 
 struct BiMPPIParam {
@@ -38,4 +60,8 @@ struct BiMPPIParam {
 
   // Reserved for compatibility with existing code.
   double psi = 0.0;
+  ClusteringMethod clustering_method = ClusteringMethod::DBSCAN;
+  int kmeans_clusters = 5;
+  int kmeans_max_iterations = 100;
+  double kmeans_threshold = 1e-6;
 };

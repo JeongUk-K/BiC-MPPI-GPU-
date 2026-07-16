@@ -14,6 +14,7 @@
 #   bash build_gpu.sh quadrotor_log_mppi  # quadrotor Log-MPPI GPU 예제만 빌드
 #   bash build_gpu.sh quadrotor_gpu_new  # quadrotor precision-landing GPU 예제 빌드
 #   bash build_gpu.sh wmrobot     # wmrobot GPU 예제 빌드
+#   bash build_gpu.sh wmrobot_accel  # 통합 CUDA 솔버의 호환용 gpu-accel 출력 빌드
 #   bash build_gpu.sh wmrobot_log_mppi  # wmrobot Log-MPPI GPU 예제만 빌드
 #   bash build_gpu.sh wmrobot_ablation  # wmrobot ablation GPU 예제 빌드
 #   bash build_gpu.sh wmrobot_same_budget  # wmrobot same-budget scaling 예제 빌드
@@ -31,8 +32,15 @@ cd "$SCRIPT_DIR"
 BUILD_ROOT="$SCRIPT_DIR/build"
 GPU_BUILD_DIR="$BUILD_ROOT/gpu"
 TARGET_GROUP="${1:-manipulator}"
+GPU_SOLVER_DIR="mppi/cuda"
 BUILD_PREFIX=""
 BUILD_COMMON_GPU_LIB=1
+
+if [ "$TARGET_GROUP" = "wmrobot_accel" ]; then
+    GPU_BUILD_DIR="$BUILD_ROOT/gpu-accel"
+    # Compatibility target: the selectable implementation now lives in cuda/.
+    GPU_SOLVER_DIR="mppi/cuda"
+fi
 
 if [ "$TARGET_GROUP" = "manipulator_workspace_collision" ] || \
    [ "$TARGET_GROUP" = "manipulator_bicmppi_workspace_example" ] || \
@@ -136,7 +144,8 @@ fi
 
 NVCCFLAGS="-O3 --std=c++14 $ARCH $CCBIN_FLAG --expt-relaxed-constexpr -Xcompiler -fopenmp"
 
-INCLUDES="-I./mppi -I./mppi/cuda -I./mppi/cpu-legacy -I./model \
+INCLUDES="-I./mppi -I./$GPU_SOLVER_DIR -I./mppi/cpu-legacy -I./model \
+          -I./include/fastsc \
           -I./include/EigenRand -I./include/matplotlibcpp \
           -I$CUDA_INCLUDE \
           $(python3-config --includes) \
@@ -144,7 +153,8 @@ INCLUDES="-I./mppi -I./mppi/cuda -I./mppi/cpu-legacy -I./model \
 
 EIGEN_INC=$(pkg-config --cflags eigen3 2>/dev/null || echo "-I/usr/include/eigen3")
 
-INCLUDES="-I./mppi -I./mppi/cuda -I./mppi/cpu-legacy -I./model \
+INCLUDES="-I./mppi -I./$GPU_SOLVER_DIR -I./mppi/cpu-legacy -I./model \
+          -I./include/fastsc \
           -I./include/EigenRand -I./include/matplotlibcpp \
           -I$CUDA_INCLUDE \
           $(python3-config --includes) \
@@ -154,6 +164,7 @@ LDFLAGS="-fopenmp"
 [ -n "$CUDART_LIB" ] && LDFLAGS="$LDFLAGS $CUDART_LIB"
 [ -n "$CURAND_LIB" ] && LDFLAGS="$LDFLAGS $CURAND_LIB"
 LDFLAGS="$LDFLAGS $(python3-config --ldflags --embed 2>/dev/null || python3-config --ldflags)"
+LDFLAGS="$LDFLAGS -lcublas"
 
 # ── 빌드 디렉토리 ─────────────────────────────────────────────────
 mkdir -p "$GPU_BUILD_DIR"
@@ -168,32 +179,36 @@ fi
 # ── GPU solver 오브젝트 파일 컴파일 ──────────────────────────────
 if [ "$BUILD_COMMON_GPU_LIB" -eq 1 ]; then
     echo "[1/?] Compiling mppi_gpu.cu ..."
-    $NVCC $NVCCFLAGS $INCLUDES -c mppi/cuda/mppi_gpu.cu -o "$GPU_BUILD_DIR/mppi_gpu.o"
+    $NVCC $NVCCFLAGS $INCLUDES -c "$GPU_SOLVER_DIR/mppi_gpu.cu" -o "$GPU_BUILD_DIR/mppi_gpu.o"
 
     echo "[2/?] Compiling cluster_mppi_gpu.cu ..."
-    $NVCC $NVCCFLAGS $INCLUDES -c mppi/cuda/cluster_mppi_gpu.cu -o "$GPU_BUILD_DIR/cluster_mppi_gpu.o"
+    $NVCC $NVCCFLAGS $INCLUDES -c "$GPU_SOLVER_DIR/cluster_mppi_gpu.cu" -o "$GPU_BUILD_DIR/cluster_mppi_gpu.o"
 
     echo "[3/?] Compiling bi_mppi_gpu.cu ..."
-    $NVCC $NVCCFLAGS $INCLUDES -c mppi/cuda/bi_mppi_gpu.cu -o "$GPU_BUILD_DIR/bi_mppi_gpu.o"
+    $NVCC $NVCCFLAGS $INCLUDES -c "$GPU_SOLVER_DIR/bi_mppi_gpu.cu" -o "$GPU_BUILD_DIR/bi_mppi_gpu.o"
 
     GPU_OBJS=("$GPU_BUILD_DIR/mppi_gpu.o" "$GPU_BUILD_DIR/cluster_mppi_gpu.o" "$GPU_BUILD_DIR/bi_mppi_gpu.o")
 
     if [ "$BUILD_SVGD_OBJ" -eq 1 ]; then
         echo "[4/?] Compiling svgd_mppi_gpu.cu ..."
-        $NVCC $NVCCFLAGS $INCLUDES -c mppi/cuda/svgd_mppi_gpu.cu -o "$GPU_BUILD_DIR/svgd_mppi_gpu.o"
+        $NVCC $NVCCFLAGS $INCLUDES -c "$GPU_SOLVER_DIR/svgd_mppi_gpu.cu" -o "$GPU_BUILD_DIR/svgd_mppi_gpu.o"
         GPU_OBJS+=("$GPU_BUILD_DIR/svgd_mppi_gpu.o")
     else
         echo "[4/?] Skipping svgd_mppi_gpu.cu for $TARGET_GROUP"
     fi
 
     echo "[5/?] Compiling log_mppi_gpu.cu ..."
-    $NVCC $NVCCFLAGS $INCLUDES -c mppi/cuda/log_mppi_gpu.cu -o "$GPU_BUILD_DIR/log_mppi_gpu.o"
+    $NVCC $NVCCFLAGS $INCLUDES -c "$GPU_SOLVER_DIR/log_mppi_gpu.cu" -o "$GPU_BUILD_DIR/log_mppi_gpu.o"
     GPU_OBJS+=("$GPU_BUILD_DIR/log_mppi_gpu.o")
+
+    echo "[fastsc] Compiling labels.cu ..."
+    $NVCC $NVCCFLAGS $INCLUDES -c include/fastsc/labels.cu -o "$GPU_BUILD_DIR/fastsc_labels.o"
+    GPU_OBJS+=("$GPU_BUILD_DIR/fastsc_labels.o")
 
     # GPU 오브젝트들을 ar로 정적 라이브러리로 묶기
     rm -f "$GPU_BUILD_DIR/libmppi_gpu.a"
     ar rcs "$GPU_BUILD_DIR/libmppi_gpu.a" "${GPU_OBJS[@]}"
-    echo "  → build/gpu/libmppi_gpu.a 생성 완료"
+    echo "  → ${GPU_BUILD_DIR#$SCRIPT_DIR/}/libmppi_gpu.a 생성 완료"
 else
     echo "[1/?] Skipping shared GPU solver library for $TARGET_GROUP"
 fi
@@ -208,7 +223,7 @@ build_target() {
         -Wl,-rpath,$(dirname ${CUDART_LIB:-/dev/null}) \
         $LDFLAGS \
         -o "$GPU_BUILD_DIR/$NAME"
-    echo "  → build/gpu/$NAME 완료"
+    echo "  → ${GPU_BUILD_DIR#$SCRIPT_DIR/}/$NAME 완료"
 }
 
 build_target_named() {
@@ -220,7 +235,7 @@ build_target_named() {
         -Wl,-rpath,$(dirname ${CUDART_LIB:-/dev/null}) \
         $LDFLAGS \
         -o "$GPU_BUILD_DIR/$NAME"
-    echo "  → build/gpu/$NAME 완료"
+    echo "  → ${GPU_BUILD_DIR#$SCRIPT_DIR/}/$NAME 완료"
 }
 
 build_manipulator_workspace_collision_target() {
@@ -229,6 +244,7 @@ build_manipulator_workspace_collision_target() {
     local LOG_OBJ="$GPU_BUILD_DIR/manipulator_workspace_log_mppi_gpu.o"
     local CLUSTER_OBJ="$GPU_BUILD_DIR/manipulator_workspace_cluster_mppi_gpu.o"
     local OBJ="$GPU_BUILD_DIR/manipulator_workspace_bi_mppi_gpu.o"
+    local FASTSC_OBJ="$GPU_BUILD_DIR/manipulator_workspace_fastsc_labels.o"
     local WS_INCLUDES="-I./$PKG_DIR/include -I./$PKG_DIR/examples -I./$PKG_DIR/examples/random_pose_benchmark -I./$PKG_DIR/examples/grid_wall $INCLUDES"
 
     echo "[workspace] Compiling manipulator workspace MPPI CUDA source ..."
@@ -242,6 +258,9 @@ build_manipulator_workspace_collision_target() {
 
     echo "[workspace] Compiling manipulator workspace BiC-MPPI CUDA source ..."
     $NVCC $NVCCFLAGS $WS_INCLUDES -c "$PKG_DIR/src/bi_mppi_gpu.cu" -o "$OBJ"
+
+    echo "[workspace] Compiling fastsc K-means support ..."
+    $NVCC $NVCCFLAGS $WS_INCLUDES -c "include/fastsc/labels.cu" -o "$FASTSC_OBJ"
 
     echo "[workspace] Building manipulator_mppi_workspace_example ..."
     $CXX $CXXFLAGS $WS_INCLUDES "$PKG_DIR/examples/manipulator_mppi_workspace_example.cpp" "$MPPI_OBJ" \
@@ -258,14 +277,14 @@ build_manipulator_workspace_collision_target() {
     echo "  → build/gpu/manipulator_logmppi_workspace_example 완료"
 
     echo "[workspace] Building manipulator_clustermppi_workspace_example ..."
-    $CXX $CXXFLAGS $WS_INCLUDES "$PKG_DIR/examples/manipulator_clustermppi_workspace_example.cpp" "$MPPI_OBJ" "$CLUSTER_OBJ" \
+    $CXX $CXXFLAGS $WS_INCLUDES "$PKG_DIR/examples/manipulator_clustermppi_workspace_example.cpp" "$MPPI_OBJ" "$CLUSTER_OBJ" "$FASTSC_OBJ" \
         -Wl,-rpath,$(dirname ${CUDART_LIB:-/dev/null}) \
         $LDFLAGS \
         -o "$GPU_BUILD_DIR/manipulator_clustermppi_workspace_example"
     echo "  → build/gpu/manipulator_clustermppi_workspace_example 완료"
 
     echo "[workspace] Building manipulator_bicmppi_workspace_example ..."
-    $CXX $CXXFLAGS $WS_INCLUDES "$PKG_DIR/examples/manipulator_bicmppi_workspace_example.cpp" "$OBJ" \
+    $CXX $CXXFLAGS $WS_INCLUDES "$PKG_DIR/examples/manipulator_bicmppi_workspace_example.cpp" "$OBJ" "$FASTSC_OBJ" \
         -Wl,-rpath,$(dirname ${CUDART_LIB:-/dev/null}) \
         $LDFLAGS \
         -o "$GPU_BUILD_DIR/manipulator_bicmppi_workspace_example"
@@ -286,14 +305,14 @@ build_manipulator_workspace_collision_target() {
     echo "  → build/gpu/manipulator_logmppi_pinkNplace_workspace_example 완료"
 
     echo "[workspace] Building manipulator_clustermppi_pinkNplace_workspace_example ..."
-    $CXX $CXXFLAGS $WS_INCLUDES "$PKG_DIR/examples/pinkNplace/manipulator_clustermppi_pinkNplace_workspace_example.cpp" "$MPPI_OBJ" "$CLUSTER_OBJ" \
+    $CXX $CXXFLAGS $WS_INCLUDES "$PKG_DIR/examples/pinkNplace/manipulator_clustermppi_pinkNplace_workspace_example.cpp" "$MPPI_OBJ" "$CLUSTER_OBJ" "$FASTSC_OBJ" \
         -Wl,-rpath,$(dirname ${CUDART_LIB:-/dev/null}) \
         $LDFLAGS \
         -o "$GPU_BUILD_DIR/manipulator_clustermppi_pinkNplace_workspace_example"
     echo "  → build/gpu/manipulator_clustermppi_pinkNplace_workspace_example 완료"
 
     echo "[workspace] Building manipulator_bicmppi_pinkNplace_workspace_example ..."
-    $CXX $CXXFLAGS $WS_INCLUDES "$PKG_DIR/examples/pinkNplace/manipulator_bicmppi_pinkNplace_workspace_example.cpp" "$OBJ" \
+    $CXX $CXXFLAGS $WS_INCLUDES "$PKG_DIR/examples/pinkNplace/manipulator_bicmppi_pinkNplace_workspace_example.cpp" "$OBJ" "$FASTSC_OBJ" \
         -Wl,-rpath,$(dirname ${CUDART_LIB:-/dev/null}) \
         $LDFLAGS \
         -o "$GPU_BUILD_DIR/manipulator_bicmppi_pinkNplace_workspace_example"
@@ -302,35 +321,35 @@ build_manipulator_workspace_collision_target() {
     echo "[workspace] Building manipulator_mppi_random_pose_benchmark ..."
     $CXX $CXXFLAGS $WS_INCLUDES "$PKG_DIR/examples/random_pose_benchmark/manipulator_mppi_random_pose_benchmark.cpp" "$MPPI_OBJ" \
         -Wl,-rpath,$(dirname ${CUDART_LIB:-/dev/null}) \
-        $LDFLAGS \
+        $LDFLAGS -lzstd \
         -o "$GPU_BUILD_DIR/manipulator_mppi_random_pose_benchmark"
     echo "  → build/gpu/manipulator_mppi_random_pose_benchmark 완료"
 
     echo "[workspace] Building manipulator_logmppi_random_pose_benchmark ..."
     $CXX $CXXFLAGS $WS_INCLUDES "$PKG_DIR/examples/random_pose_benchmark/manipulator_logmppi_random_pose_benchmark.cpp" "$MPPI_OBJ" "$LOG_OBJ" \
         -Wl,-rpath,$(dirname ${CUDART_LIB:-/dev/null}) \
-        $LDFLAGS \
+        $LDFLAGS -lzstd \
         -o "$GPU_BUILD_DIR/manipulator_logmppi_random_pose_benchmark"
     echo "  → build/gpu/manipulator_logmppi_random_pose_benchmark 완료"
 
     echo "[workspace] Building manipulator_clustermppi_random_pose_benchmark ..."
-    $CXX $CXXFLAGS $WS_INCLUDES "$PKG_DIR/examples/random_pose_benchmark/manipulator_clustermppi_random_pose_benchmark.cpp" "$MPPI_OBJ" "$CLUSTER_OBJ" \
+    $CXX $CXXFLAGS $WS_INCLUDES "$PKG_DIR/examples/random_pose_benchmark/manipulator_clustermppi_random_pose_benchmark.cpp" "$MPPI_OBJ" "$CLUSTER_OBJ" "$FASTSC_OBJ" \
         -Wl,-rpath,$(dirname ${CUDART_LIB:-/dev/null}) \
-        $LDFLAGS \
+        $LDFLAGS -lzstd \
         -o "$GPU_BUILD_DIR/manipulator_clustermppi_random_pose_benchmark"
     echo "  → build/gpu/manipulator_clustermppi_random_pose_benchmark 완료"
 
     echo "[workspace] Building manipulator_bicmppi_random_pose_benchmark ..."
-    $CXX $CXXFLAGS $WS_INCLUDES "$PKG_DIR/examples/random_pose_benchmark/manipulator_bicmppi_random_pose_benchmark.cpp" "$OBJ" \
+    $CXX $CXXFLAGS $WS_INCLUDES "$PKG_DIR/examples/random_pose_benchmark/manipulator_bicmppi_random_pose_benchmark.cpp" "$OBJ" "$FASTSC_OBJ" \
         -Wl,-rpath,$(dirname ${CUDART_LIB:-/dev/null}) \
-        $LDFLAGS \
+        $LDFLAGS -lzstd \
         -o "$GPU_BUILD_DIR/manipulator_bicmppi_random_pose_benchmark"
     echo "  → build/gpu/manipulator_bicmppi_random_pose_benchmark 완료"
 
     local GRID_WALL_SRC="$PKG_DIR/examples/grid_wall/manipulator_grid_wall_workspace_example.cpp"
     if [ -f "$GRID_WALL_SRC" ]; then
         echo "[workspace] Building manipulator_grid_wall_workspace_example ..."
-        $CXX $CXXFLAGS $WS_INCLUDES "$GRID_WALL_SRC" "$OBJ" \
+        $CXX $CXXFLAGS $WS_INCLUDES "$GRID_WALL_SRC" "$OBJ" "$FASTSC_OBJ" \
             -Wl,-rpath,$(dirname ${CUDART_LIB:-/dev/null}) \
             $LDFLAGS \
             -o "$GPU_BUILD_DIR/manipulator_grid_wall_workspace_example"
@@ -345,7 +364,7 @@ build_manipulator_workspace_collision_target() {
     local GRID_APPROACH_SRC="$PKG_DIR/examples/grid_wall/manipulator_grid_approach_workspace_example.cpp"
     if [ -f "$GRID_APPROACH_SRC" ]; then
         echo "[workspace] Building manipulator_grid_approach_workspace_example ..."
-        $CXX $CXXFLAGS $WS_INCLUDES "$GRID_APPROACH_SRC" "$OBJ" \
+        $CXX $CXXFLAGS $WS_INCLUDES "$GRID_APPROACH_SRC" "$OBJ" "$FASTSC_OBJ" \
             -Wl,-rpath,$(dirname ${CUDART_LIB:-/dev/null}) \
             $LDFLAGS \
             -o "$GPU_BUILD_DIR/manipulator_grid_approach_workspace_example"
@@ -396,13 +415,28 @@ case "$TARGET_GROUP" in
         build_target "src/quadrotor/gpu new/svgd_mppi.cpp"
         ;;
     wmrobot)
-        # ---- WMRobot GPU 버전 ----
+        # ---- 모든 src/wmrobot/gpu/*.cpp 예제 ----
         BUILD_PREFIX="wmrobot_"
-        build_target src/wmrobot/gpu/mppi.cpp
-        build_target src/wmrobot/gpu/log_mppi.cpp
-        build_target src/wmrobot/gpu/cluster_mppi.cpp
-        build_target src/wmrobot/gpu/bi_mppi.cpp
-        build_target src/wmrobot/gpu/svgd_mppi.cpp
+        for SRC in src/wmrobot/gpu/*.cpp; do
+            STEM="$(basename "${SRC%.cpp}")"
+            if [ "$STEM" = "bi_mppi_SE(2)" ]; then
+                build_target_named "$SRC" "wmrobot_bi_mppi_se2"
+            else
+                build_target "$SRC"
+            fi
+        done
+        ;;
+    wmrobot_accel)
+        # ---- Compatibility alias for the unified selectable CUDA solver ----
+        BUILD_PREFIX="wmrobot_"
+        for SRC in src/wmrobot/gpu/*.cpp; do
+            STEM="$(basename "${SRC%.cpp}")"
+            if [ "$STEM" = "bi_mppi_SE(2)" ]; then
+                build_target_named "$SRC" "wmrobot_bi_mppi_se2"
+            else
+                build_target "$SRC"
+            fi
+        done
         ;;
     wmrobot_log_mppi)
         # ---- WMRobot Log-MPPI GPU 단일 예제 ----
@@ -470,7 +504,7 @@ case "$TARGET_GROUP" in
         ;;
     *)
         echo "ERROR: unknown GPU target group: $TARGET_GROUP"
-        echo "Usage: bash build_gpu.sh [manipulator|manipulator_workspace_collision|manipulator_grid_wall_workspace_example|manipulator_grid_approach_workspace_example|quadrotor|quadrotor_log_mppi|quadrotor_gpu_new|wmrobot|wmrobot_log_mppi|wmrobot_ablation|wmrobot_same_budget|wmrobot_waypoint|wmrobot_waypoint_stitched|wmrobot_waypoint_stitched_sequential|wmrobot_map_285|velo]"
+        echo "Usage: bash build_gpu.sh [manipulator|manipulator_workspace_collision|manipulator_grid_wall_workspace_example|manipulator_grid_approach_workspace_example|quadrotor|quadrotor_log_mppi|quadrotor_gpu_new|wmrobot|wmrobot_accel|wmrobot_log_mppi|wmrobot_ablation|wmrobot_same_budget|wmrobot_waypoint|wmrobot_waypoint_stitched|wmrobot_waypoint_stitched_sequential|wmrobot_map_285|velo]"
         exit 1
         ;;
 esac
@@ -501,7 +535,7 @@ elif [ "$TARGET_GROUP" = "manipulator_workspace_collision" ] || \
     echo "      cd build && ./gpu/manipulator_grid_approach_workspace_example --goal 8"
     echo "출력: build/manipulator_workspace_{mppi,logmppi,clustermppi,bicmppi}_*.csv"
     echo "      build/manipulator_pinkNplace_{mppi,logmppi,clustermppi,bicmppi}_*.csv"
-    echo "      random_pose_benchmark/results/"
+    echo "      result/manipulator/"
     echo "      build/manipulator_grid_wall_bicmppi_*.csv"
     echo "      build/manipulator_grid_approach_bicmppi_*.csv"
 elif [ "$TARGET_GROUP" = "quadrotor_log_mppi" ]; then
@@ -509,12 +543,21 @@ elif [ "$TARGET_GROUP" = "quadrotor_log_mppi" ]; then
 elif [ "$TARGET_GROUP" = "quadrotor_gpu_new" ]; then
     echo "실행: cd build && ./gpu/quadrotor_gpu_new_mppi --smoke"
     echo "      cd build && ./gpu/quadrotor_gpu_new_bi_mppi --smoke"
+elif [ "$TARGET_GROUP" = "wmrobot" ]; then
+    echo "실행: cd build && ./gpu/wmrobot_cluster_mppi --smoke --clustering dbscan"
+    echo "      cd build && ./gpu/wmrobot_bi_mppi --smoke --clustering dbscan"
+    echo "      cd build && ./gpu/wmrobot_cluster_mppi_kmeans --smoke"
+    echo "      cd build && ./gpu/wmrobot_bi_mppi_kmeans --smoke"
 elif [ "$TARGET_GROUP" = "wmrobot_ablation" ]; then
     echo "실행: cd build && ./gpu/wmrobot_ablation_gpu_all --smoke"
     echo "      cd build && ./gpu/wmrobot_ablation_gpu_mppi"
     echo "      cd build && ./gpu/wmrobot_ablation_gpu_full_bic_mppi"
 elif [ "$TARGET_GROUP" = "wmrobot_log_mppi" ]; then
     echo "실행: cd build && ./gpu/wmrobot_log_mppi"
+elif [ "$TARGET_GROUP" = "wmrobot_accel" ]; then
+    echo "실행: cd build && ./gpu-accel/wmrobot_mppi --smoke"
+    echo "      cd build && ./gpu-accel/wmrobot_cluster_mppi --smoke --clustering kmeans"
+    echo "      cd build && ./gpu-accel/wmrobot_bi_mppi --smoke --clustering dbscan"
 elif [ "$TARGET_GROUP" = "wmrobot_same_budget" ]; then
     echo "실행: cd build && ./gpu/wmrobot_same_budget_all --smoke"
     echo "      cd build && ./gpu/wmrobot_same_budget_mppi --smoke"

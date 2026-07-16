@@ -6,6 +6,7 @@
 
 #include <Eigen/Dense>
 #include <chrono>
+#include <cstdint>
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
@@ -17,14 +18,23 @@ namespace {
 struct BiMppiConfig {
   int Tf = 50;
   int Tb = 50;
-  int Nf = 10000;
-  int Nb = 10000;
-  int Nr = 5000;
+  int Nf = 6000;
+  int Nb = 6000;
+  int Nr = 3000;
   int maxiter = 200;
   int map_begin = 299;
   int num_maps = 300;
   int start_cases = 2;
   int vis_every = 1;
+  bool has_seed = false;
+  std::uint_fast64_t seed = 0;
+  ClusteringMethod clustering_method = ClusteringMethod::DBSCAN;
+  int kmeans_clusters = 5;
+  int kmeans_max_iterations = 100;
+  double kmeans_threshold = 1e-6;
+  std::string connection_metric = "euclidean";
+  double se2_weight_xy = 0.2;
+  double se2_weight_theta = 1.0;
   bool save_rollouts = true;
   std::string dataset_dir = "../BARN_dataset/txt_files";
 };
@@ -46,6 +56,14 @@ void printUsage(const char *argv0) {
             << "  --Nf N               Forward rollout count. Default: 10000\n"
             << "  --Nb N               Backward rollout count. Default: 10000\n"
             << "  --Nr N               Guide rollout count. Default: 5000\n"
+            << "  --seed N             Fixed CUDA random seed\n"
+            << "  --clustering NAME    dbscan or kmeans. Default: dbscan\n"
+            << "  --kmeans-clusters N  K-means cluster count. Default: 5\n"
+            << "  --kmeans-iters N     K-means max iterations. Default: 100\n"
+            << "  --kmeans-threshold X K-means convergence threshold. Default: 1e-6\n"
+            << "  --connection-metric NAME  euclidean or se2. Default: euclidean\n"
+            << "  --se2-weight-xy W    SE(2) position weight. Default: 0.2\n"
+            << "  --se2-weight-theta W SE(2) heading weight. Default: 1.0\n"
             << "  --dataset-dir DIR    BARN txt file directory\n"
             << "  --vis-every N        Save rollout data every N iterations. Default: 1\n"
             << "  --no-rollouts        Save CSV files only\n";
@@ -93,6 +111,29 @@ BiMppiConfig parseArgs(int argc, char **argv) {
       config.Nb = std::stoi(require_value(key));
     } else if (key == "--Nr") {
       config.Nr = std::stoi(require_value(key));
+    } else if (key == "--seed") {
+      config.seed = static_cast<std::uint_fast64_t>(
+          std::stoull(require_value(key)));
+      config.has_seed = true;
+    } else if (key == "--clustering") {
+      config.clustering_method = parseClusteringMethod(require_value(key));
+    } else if (key == "--kmeans-clusters") {
+      config.kmeans_clusters = std::stoi(require_value(key));
+    } else if (key == "--kmeans-iters") {
+      config.kmeans_max_iterations = std::stoi(require_value(key));
+    } else if (key == "--kmeans-threshold") {
+      config.kmeans_threshold = std::stod(require_value(key));
+    } else if (key == "--connection-metric") {
+      config.connection_metric = require_value(key);
+      if (config.connection_metric != "euclidean" &&
+          config.connection_metric != "se2") {
+        throw std::runtime_error(
+            "--connection-metric must be either 'euclidean' or 'se2'");
+      }
+    } else if (key == "--se2-weight-xy") {
+      config.se2_weight_xy = std::stod(require_value(key));
+    } else if (key == "--se2-weight-theta") {
+      config.se2_weight_theta = std::stod(require_value(key));
     } else if (key == "--dataset-dir") {
       config.dataset_dir = require_value(key);
     } else if (key == "--vis-every") {
@@ -103,6 +144,14 @@ BiMppiConfig parseArgs(int argc, char **argv) {
       throw std::runtime_error("Unknown argument: " + key);
     }
   }
+  if (config.kmeans_clusters <= 0 || config.kmeans_max_iterations <= 0 ||
+      config.kmeans_threshold < 0.0)
+    throw std::runtime_error(
+        "K-means parameters must be positive (threshold may be zero)");
+  if (config.se2_weight_xy < 0.0 || config.se2_weight_theta < 0.0 ||
+      (config.se2_weight_xy == 0.0 && config.se2_weight_theta == 0.0))
+    throw std::runtime_error(
+        "SE(2) weights must be non-negative and not both zero");
   return config;
 }
 
@@ -138,17 +187,25 @@ int main(int argc, char **argv) {
   param.minpts = 5;
   param.epsilon = 0.01;
   param.psi = 0.6;
+  param.clustering_method = config.clustering_method;
+  param.kmeans_clusters = config.kmeans_clusters;
+  param.kmeans_max_iterations = config.kmeans_max_iterations;
+  param.kmeans_threshold = config.kmeans_threshold;
 
   int maxiter = config.maxiter;
 
-  const std::string variant = "BiC-MPPI";
+  const bool use_se2 = config.connection_metric == "se2";
+  const std::string variant = use_se2 ? "BiC-MPPI-SE2" : "BiC-MPPI";
+  const std::string output_prefix =
+      use_se2 ? "result_bi_mppi_se2" : "result_bi_mppi";
+  const std::string vis_prefix = use_se2 ? "bi_mppi_se2" : "bi_mppi";
   std::vector<WmrobotGpuRunResult> runs;
 
-  std::ofstream csv("result_bi_mppi.csv");
+  std::ofstream csv(output_prefix + ".csv");
   writeWmrobotGpuRunHeader(csv);
   csv.flush();
 
-  std::ofstream progress_csv("result_bi_mppi_progress.csv");
+  std::ofstream progress_csv(output_prefix + "_progress.csv");
   writeWmrobotGpuRunHeader(progress_csv);
   progress_csv.flush();
 
@@ -175,13 +232,19 @@ int main(int argc, char **argv) {
                                 0.1);
 
       Solver solver(model);
+      if (config.has_seed) solver.setSeed(config.seed);
       solver.U_f0 = Eigen::MatrixXd::Zero(model.dim_u, param.Tf);
       solver.U_b0 = Eigen::MatrixXd::Zero(model.dim_u, param.Tb);
       solver.init(param);
+      if (use_se2) {
+        solver.setConnectionMetric(Solver::ConnectionMetric::SE2);
+        solver.setSE2ConnectionWeights(config.se2_weight_xy,
+                                       config.se2_weight_theta);
+      }
       solver.setCollisionChecker(&collision_checker);
 
       MPPIVisLogger vis_logger;
-      initWmrobotGpuVisLogger(vis_logger, config.save_rollouts, "bi_mppi", s,
+      initWmrobotGpuVisLogger(vis_logger, config.save_rollouts, vis_prefix, s,
                               map, model.dim_x, param.Tf + param.Tb,
                               collision_checker, param.x_init,
                               param.x_target);
@@ -240,7 +303,7 @@ int main(int argc, char **argv) {
   progress_csv.close();
 
   const auto summary = summarizeWmrobotGpuRuns(variant, runs);
-  std::ofstream summary_csv("result_bi_mppi_summary.csv");
+  std::ofstream summary_csv(output_prefix + "_summary.csv");
   writeWmrobotGpuSummaryHeader(summary_csv);
   writeWmrobotGpuSummaryRow(summary_csv, summary);
   return 0;

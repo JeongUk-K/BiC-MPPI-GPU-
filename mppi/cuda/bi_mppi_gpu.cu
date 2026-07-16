@@ -1,4 +1,5 @@
 #include "bi_mppi_gpu.cuh"
+#include "gpu_kmeans.cuh"
 #include "mppi_gpu.cuh"   // rollout_kernel 접근을 위해 포함
 #include <algorithm>
 #include <cassert>
@@ -234,6 +235,10 @@ void BiMPPI_GPU::init(BiMPPIParam p) {
     x_init = p.x_init; x_target = p.x_target;
     deviation_mu = p.deviation_mu; cost_mu = p.cost_mu; epsilon = p.epsilon;
     minpts = p.minpts; psi = p.psi;
+    clustering_method = p.clustering_method;
+    kmeans_clusters = p.kmeans_clusters;
+    kmeans_max_iterations = p.kmeans_max_iterations;
+    kmeans_threshold = p.kmeans_threshold;
 
     sigma_diag.resize(dim_u);
     for (int d = 0; d < dim_u; ++d) sigma_diag[d] = p.sigma_u(d,d);
@@ -256,6 +261,21 @@ void BiMPPI_GPU::init(BiMPPIParam p) {
 void BiMPPI_GPU::setCollisionChecker(CollisionChecker* cc) {
     collision_checker = cc;
     uploadCollisionData();
+}
+
+void BiMPPI_GPU::setConnectionMetric(ConnectionMetric metric) {
+    connection_metric = metric;
+}
+
+void BiMPPI_GPU::setSE2ConnectionWeights(double xy_weight,
+                                         double theta_weight) {
+    if (xy_weight < 0.0 || theta_weight < 0.0 ||
+        (xy_weight == 0.0 && theta_weight == 0.0)) {
+        throw std::invalid_argument(
+            "SE(2) connection weights must be non-negative and not both zero.");
+    }
+    se2_connection_xy_weight = xy_weight;
+    se2_connection_theta_weight = theta_weight;
 }
 
 void BiMPPI_GPU::uploadCollisionData() {
@@ -418,7 +438,7 @@ void BiMPPI_GPU::dbscan(std::vector<std::vector<int>>& clusters,
     const Eigen::MatrixXd* feature_ptr = &feature_source;
 
     const bool source_is_control_sequence =
-        (feature_source.rows() == Ns * dim_u && feature_source.cols() >= kNumBlocks);
+        (feature_source.rows() == Ns * dim_u && feature_source.cols() > 0);
 
     if (source_is_control_sequence) {
         const int T_steps = static_cast<int>(feature_source.cols());
@@ -544,6 +564,41 @@ void BiMPPI_GPU::dbscan(std::vector<std::vector<int>>& clusters,
     }
 }
 
+// ── fastsc K-means (GPU, using the same feature construction as DBSCAN) ──
+void BiMPPI_GPU::kmeansCluster(
+    std::vector<std::vector<int>>& clusters,
+    const Eigen::MatrixXd& feature_source, const Eigen::VectorXd& costs,
+    int sample_count) {
+    constexpr int kNumBlocks = 3;
+    Eigen::MatrixXd block_feature;
+    const Eigen::MatrixXd* feature_ptr = &feature_source;
+
+    const bool source_is_control_sequence =
+        feature_source.rows() == sample_count * dim_u &&
+        feature_source.cols() > 0;
+    if (source_is_control_sequence) {
+        const int time_steps = static_cast<int>(feature_source.cols());
+        block_feature = Eigen::MatrixXd::Zero(kNumBlocks * dim_u, sample_count);
+        for (int i = 0; i < sample_count; ++i) {
+            for (int block = 0; block < kNumBlocks; ++block) {
+                const int t0 = (block * time_steps) / kNumBlocks;
+                const int t1 = ((block + 1) * time_steps) / kNumBlocks;
+                const int length = std::max(1, t1 - t0);
+                for (int d = 0; d < dim_u; ++d) {
+                    double sum = 0.0;
+                    for (int t = t0; t < t1; ++t)
+                        sum += feature_source(i * dim_u + d, t);
+                    block_feature(block * dim_u + d, i) = sum / length;
+                }
+            }
+        }
+        feature_ptr = &block_feature;
+    }
+
+    runGPUKMeans(clusters, *feature_ptr, costs,
+                 {kmeans_clusters, kmeans_max_iterations, kmeans_threshold});
+}
+
 // ── calculateU (CPU) ──────────────────────────────────────────────
 void BiMPPI_GPU::calculateU(Eigen::MatrixXd& Uout,
                              const std::vector<std::vector<int>>& clusters,
@@ -589,7 +644,10 @@ void BiMPPI_GPU::forwardRollout() {
     Eigen::MatrixXd Ui_f = flat_Ui_to_eigen(hUi, Nf, dim_u, Tf);
     appendVisRolloutSamples(Ui_f, Nf, Tf, false);
     clusters_f.clear();
-    dbscan(clusters_f, Ui_f, costs_f, Nf);
+    if (clustering_method == ClusteringMethod::KMeans)
+        kmeansCluster(clusters_f, Ui_f, costs_f, Nf);
+    else
+        dbscan(clusters_f, Ui_f, costs_f, Nf);
     if(clusters_f.empty()) clusters_f.push_back(full_cluster_f);
     calculateU(Uf,clusters_f,costs_f,Ui_f,Tf);
     Xf.resize(clusters_f.size()*dim_x,Tf+1);
@@ -627,7 +685,10 @@ void BiMPPI_GPU::backwardRollout() {
     Eigen::MatrixXd Ui_b = flat_Ui_to_eigen(hUi, Nb, dim_u, Tb);
     appendVisRolloutSamples(Ui_b, Nb, Tb, true);
     clusters_b.clear();
-    dbscan(clusters_b, Ui_b, costs_b, Nb);
+    if (clustering_method == ClusteringMethod::KMeans)
+        kmeansCluster(clusters_b, Ui_b, costs_b, Nb);
+    else
+        dbscan(clusters_b, Ui_b, costs_b, Nb);
     if(clusters_b.empty()) clusters_b.push_back(full_cluster_b);
     calculateU(Ub,clusters_b,costs_b,Ui_b,Tb);
     Xb.resize(clusters_b.size()*dim_x,Tb+1);
@@ -644,6 +705,21 @@ void BiMPPI_GPU::backwardRollout() {
 }
 
 // ── selectConnection ──────────────────────────────────────────────
+double BiMPPI_GPU::connectionMetricDistance(
+    const Eigen::Ref<const Eigen::VectorXd> &xf,
+    const Eigen::Ref<const Eigen::VectorXd> &xb) const {
+    if (connection_metric == ConnectionMetric::SE2 && dim_x >= 3) {
+        const double dx = xf(0) - xb(0);
+        const double dy = xf(1) - xb(1);
+        const double dtheta = std::atan2(std::sin(xf(2) - xb(2)),
+                                         std::cos(xf(2) - xb(2)));
+        return std::sqrt(se2_connection_xy_weight * (dx * dx + dy * dy) +
+                         se2_connection_theta_weight * (dtheta * dtheta));
+    }
+
+    return (xf - xb).norm();
+}
+
 void BiMPPI_GPU::selectConnection() {
     joints.clear();
     for(int cf=0;cf<(int)clusters_f.size();++cf){
@@ -652,6 +728,11 @@ void BiMPPI_GPU::selectConnection() {
             for(int df__=0;df__<=Tf;++df__)
                 for(int db__=0;db__<=Tb;++db__){
                     double n=(Xf.block(cf*dim_x,df__,dim_x,1)-Xb.block(cb_*dim_x,db__,dim_x,1)).norm();
+                    if (connection_metric == ConnectionMetric::SE2) {
+                        n = connectionMetricDistance(
+                            Xf.block(cf * dim_x, df__, dim_x, 1),
+                            Xb.block(cb_ * dim_x, db__, dim_x, 1));
+                    }
                     if(n<mn){mn=n;cb=cb_;df_=df__;db_=db__;}
                 }
         joints.push_back({cf,cb,df_,db_});
@@ -669,9 +750,15 @@ double BiMPPI_GPU::connectionDistance() const {
             df > Tf || db > Tb) {
             continue;
         }
-        total += (Xf.block(cf * dim_x, df, dim_x, 1) -
-                  Xb.block(cb * dim_x, db, dim_x, 1))
-                     .norm();
+        double distance = (Xf.block(cf * dim_x, df, dim_x, 1) -
+                           Xb.block(cb * dim_x, db, dim_x, 1))
+                              .norm();
+        if (connection_metric == ConnectionMetric::SE2) {
+            distance = connectionMetricDistance(
+                Xf.block(cf * dim_x, df, dim_x, 1),
+                Xb.block(cb * dim_x, db, dim_x, 1));
+        }
+        total += distance;
         ++count;
     }
     if (count == 0) {

@@ -22,7 +22,7 @@
 // 아키텍처:
 //   - Forward / Backward rollout의 비용 평가 → GPU 커널
 //   - SVGD surrogate gradient step → GPU 커널 (particle별 병렬)
-//   - DBSCAN 클러스터링 / selectConnection / guideMPPI → CPU Eigen
+//   - DBSCAN 또는 fastsc GPU K-means 클러스터링
 // ============================================================
 class SVGDMPPI_GPU {
 public:
@@ -65,6 +65,10 @@ protected:
 
   double deviation_mu, epsilon, psi, cost_mu;
   int minpts;
+  ClusteringMethod clustering_method = ClusteringMethod::DBSCAN;
+  int kmeans_clusters = 5;
+  int kmeans_max_iterations = 100;
+  double kmeans_threshold = 1e-6;
 
   CollisionChecker *collision_checker{nullptr};
   MPPIVisLogger *vis_logger = nullptr;
@@ -126,6 +130,9 @@ protected:
   void dbscan(std::vector<std::vector<int>> &clusters,
               const Eigen::MatrixXd &Di, const Eigen::VectorXd &costs,
               int N_samples);
+  void kmeansCluster(std::vector<std::vector<int>> &clusters,
+                     const Eigen::MatrixXd &feature,
+                     const Eigen::VectorXd &costs, int N_samples);
   void calculateU(Eigen::MatrixXd &Uout,
                   const std::vector<std::vector<int>> &clusters,
                   const Eigen::VectorXd &costs, const Eigen::MatrixXd &Ui_cpu,
