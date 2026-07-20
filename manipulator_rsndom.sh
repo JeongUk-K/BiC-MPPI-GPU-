@@ -21,8 +21,9 @@ usage() {
 Usage: $(basename "$0") [options]
 
 Build and run the manipulator random_pose_benchmark examples, then create GIFs.
-The full benchmark evaluates all 240 ordered start-goal pairs per solver.
-Rendering all solvers without --skip-gifs creates 960 GIFs.
+By default it evaluates representative scenarios 0, 129, and 239 from the
+240 ordered start-goal pairs and saves every sampled rollout's q, q_dot, and EE.
+Rendering all solvers without --skip-gifs creates 12 executed-path GIFs.
 
 Options:
   --skip-build          Reuse existing build/gpu random-pose benchmark binaries
@@ -274,6 +275,8 @@ for solver in "${VIS_SOLVERS[@]}"; do
   echo "  $BENCHMARK_DIR/manipulator_random_pose_benchmark_${solver}_stats.csv"
 done
 echo "  $BENCHMARK_DIR/manipulator_random_pose_benchmark_final_stats.csv"
+echo "  $BENCHMARK_DIR/rollout_state/<solver>/  (q + q_dot)"
+echo "  $BENCHMARK_DIR/rollout_ee/<solver>/     (EE xyz)"
 if [[ "$SKIP_GIFS" -eq 0 ]]; then
   echo "  $GIF_DIR/"
 fi

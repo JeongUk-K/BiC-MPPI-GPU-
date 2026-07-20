@@ -16,8 +16,8 @@ from mpl_toolkits.mplot3d.art3d import Poly3DCollection
 import numpy as np
 
 
-DH_A = np.array([0.0, -0.427, -0.357, 0.0, 0.0, 0.0])
-DH_D = np.array([0.15, 0.0, 0.0, 0.11, 0.09, 0.09])
+DH_A = np.array([0.0, -0.425, -0.392, 0.0, 0.0, 0.0])
+DH_D = np.array([0.163, 0.0, 0.0, 0.127, 0.1, 0.1])
 DH_ALPHA = np.array([math.pi / 2.0, 0.0, 0.0, math.pi / 2.0, -math.pi / 2.0, 0.0])
 
 DEFAULT_OBSTACLE_BOUNDS = ((-0.34, -0.20), (-0.52, -0.38), (0.28, 0.42))

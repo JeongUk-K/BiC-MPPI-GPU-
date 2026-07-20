@@ -51,7 +51,7 @@ legacy_cuda_dynamics(const double *x, const double *u, double *x_dot, int dim_x,
       const double inertia[6] = {4.0, 3.5, 2.5, 0.9, 0.6, 0.35};
       const double damping[6] = {3.5, 3.2, 2.5, 0.8, 0.5, 0.35};
       const double gravity_amp[6] = {0.0, 7.0, 4.5, 0.6, 0.3, 0.15};
-      const double tau_max[6] = {18.0, 18.0, 14.0, 8.0, 6.0, 4.0};
+      const double tau_max[6] = {150.0, 150.0, 150.0, 28.0, 28.0, 28.0};
       for (int i = 0; i < 6; ++i) {
         const double tau = legacy_cuda_clamp(u[i], -tau_max[i], tau_max[i]);
         x_dot[i] = x[6 + i];
@@ -117,10 +117,10 @@ __device__ __forceinline__ void legacy_cuda_dh(double theta, double a, double d,
 
 __device__ __forceinline__ void
 legacy_cuda_manipulator_fk_points(const double *x, double *px, double *py, double *pz) {
-  const double L2 = 0.427;
-  const double L3 = 0.357;
+  const double L2 = 0.425;
+  const double L3 = 0.392;
   const double a[6] = {0.0, -L2, -L3, 0.0, 0.0, 0.0};
-  const double d[6] = {0.15, 0.0, 0.0, 0.11, 0.09, 0.09};
+  const double d[6] = {0.163, 0.0, 0.0, 0.127, 0.1, 0.1};
   const double alpha[6] = {M_PI / 2.0, 0.0, 0.0, M_PI / 2.0, -M_PI / 2.0, 0.0};
 
   double T[16] = {1.0, 0.0, 0.0, 0.0,
@@ -264,8 +264,8 @@ legacy_cuda_stage_cost(const double *x, const double *u, int dim_x, int dim_u,
                        double safe_margin = 0.10, double hard_margin = 0.0) {
   if (model_type == LEGACY_CUDA_MANIPULATOR && dim_x >= 12 && dim_u >= 6) {
     double u2 = 0.0, v2 = 0.0, lim = 0.0;
-    const double qmin[6] = {-2.0 * M_PI, -2.0 * M_PI, -165.0 * M_PI / 180.0, -2.0 * M_PI, -2.0 * M_PI, -2.0 * M_PI};
-    const double qmax[6] = { 2.0 * M_PI,  2.0 * M_PI,  165.0 * M_PI / 180.0,  2.0 * M_PI,  2.0 * M_PI,  2.0 * M_PI};
+    const double qmin[6] = {-6.28319, -6.28319, -3.1415, -6.28319, -6.28319, -6.28319};
+    const double qmax[6] = { 6.28319,  6.28319,  3.1415,  6.28319,  6.28319,  6.28319};
     for (int i = 0; i < 6; ++i) {
       u2 += u[i] * u[i];
       v2 += x[6 + i] * x[6 + i];

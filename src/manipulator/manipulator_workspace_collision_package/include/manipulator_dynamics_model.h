@@ -49,12 +49,11 @@ public:
   Eigen::Matrix<double, kDof, 1> damping;
   Eigen::Matrix<double, kDof, 1> gravity_amp;
 
-  // DH parameters, approximately RB5-like. Replace these with the exact robot
-  // URDF/DH parameters before reporting hardware-specific results.
-  const double L2 = 0.427;
-  const double L3 = 0.357;
-  double dh_a[kDof] = {0.0, -0.427, -0.357, 0.0, 0.0, 0.0};
-  double dh_d[kDof] = {0.15, 0.0, 0.0, 0.11, 0.09, 0.09};
+  // UR5e DH parameters derived from model/ur5e.xml.
+  const double L2 = 0.425;
+  const double L3 = 0.392;
+  double dh_a[kDof] = {0.0, -0.425, -0.392, 0.0, 0.0, 0.0};
+  double dh_d[kDof] = {0.163, 0.0, 0.0, 0.127, 0.1, 0.1};
   double dh_alpha[kDof] = {M_PI / 2.0, 0.0, 0.0, M_PI / 2.0, -M_PI / 2.0, 0.0};
 
   // Cost weights.
@@ -288,12 +287,11 @@ private:
     dim_x = 2 * kDof;
     dim_u = kDof;
 
-    q_min << -2.0 * M_PI, -2.0 * M_PI, -165.0 * M_PI / 180.0,
-             -2.0 * M_PI, -2.0 * M_PI, -2.0 * M_PI;
-    q_max <<  2.0 * M_PI,  2.0 * M_PI,  165.0 * M_PI / 180.0,
-              2.0 * M_PI,  2.0 * M_PI,  2.0 * M_PI;
+    q_min << -6.28319, -6.28319, -3.1415, -6.28319, -6.28319, -6.28319;
+    q_max <<  6.28319,  6.28319,  3.1415,  6.28319,  6.28319,  6.28319;
     qdot_max << 2.0, 2.0, 2.0, 2.5, 2.5, 2.5;
-    tau_max << 18.0, 18.0, 14.0, 8.0, 6.0, 4.0;
+    // ur5e.xml actuator force ranges: size3 joints and size1 wrist joints.
+    tau_max << 150.0, 150.0, 150.0, 28.0, 28.0, 28.0;
 
     inertia << 4.0, 3.5, 2.5, 0.9, 0.6, 0.35;
     damping << 3.5, 3.2, 2.5, 0.8, 0.5, 0.35;

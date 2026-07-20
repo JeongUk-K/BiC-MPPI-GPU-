@@ -122,14 +122,16 @@ struct BenchmarkConfig {
 
   std::string output_root = "../result/manipulator";
   bool save_rollout_ee = true;
-  bool save_rollout_state = false;
-  std::vector<int> selected_scenario_ids;
+  bool save_rollout_state = true;
+  // Three representative cases from the 240 ordered pose pairs.
+  std::vector<int> selected_scenario_ids = {0, 129, 239};
 };
 
 inline BenchmarkConfig benchmarkConfigFromEnvironment() {
   BenchmarkConfig config;
   if (const char *value = std::getenv("MANIPULATOR_BENCHMARK_SCENARIOS")) {
     config.scenario_count = std::stoi(value);
+    config.selected_scenario_ids.clear();
   }
   if (const char *value = std::getenv("MANIPULATOR_BENCHMARK_MAX_ITER")) {
     config.max_iter = std::stoi(value);
@@ -145,6 +147,7 @@ inline BenchmarkConfig benchmarkConfigFromEnvironment() {
   }
   if (const char *value =
           std::getenv("MANIPULATOR_BENCHMARK_SCENARIO_IDS")) {
+    config.selected_scenario_ids.clear();
     std::stringstream stream(value);
     std::string token;
     while (std::getline(stream, token, ',')) {

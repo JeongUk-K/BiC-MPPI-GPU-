@@ -48,12 +48,12 @@ public:
     obstacles.push_back({x, x + w, y, y + h, z, z + d});
   }
 
-  // DH Parameters (RB5 추정치)
+  // DH Parameters (model/ur5e.xml)
   // a: Link length, d: Link offset, alpha: Link twist
-  const double L2 = 0.427;
-  const double L3 = 0.357;
+  const double L2 = 0.425;
+  const double L3 = 0.392;
   const double dh_a[6] = {0.0, -L2, -L3, 0.0, 0.0, 0.0};
-  const double dh_d[6] = {0.15, 0.0, 0.0, 0.11, 0.09, 0.09};
+  const double dh_d[6] = {0.163, 0.0, 0.0, 0.127, 0.1, 0.1};
   const double dh_alpha[6] = {M_PI / 2, 0.0, 0.0, M_PI / 2, -M_PI / 2, 0.0};
 
   // 각 관절의 SE(3) 상태 반환
@@ -81,14 +81,13 @@ Manipulator::Manipulator() {
   // 2. Physical Limits
   // [One-step MPPI 논문] 관절 한계를 ±q 범위로 명확히 설정
   // ==========================================================================
-  // RB5 approximate joint limits [rad]
+  // UR5e joint limits from model/ur5e.xml [rad]. All joints inherit the
+  // ur5e default range; elbow_joint overrides it with size3_limited.
   q_min = Eigen::VectorXd(dof);
-  q_min << -2.0 * M_PI, -2.0 * M_PI, -165.0 * M_PI / 180.0, -2.0 * M_PI,
-      -2.0 * M_PI, -2.0 * M_PI;
+  q_min << -6.28319, -6.28319, -3.1415, -6.28319, -6.28319, -6.28319;
 
   q_max = Eigen::VectorXd(dof);
-  q_max << 2.0 * M_PI, 2.0 * M_PI, 165.0 * M_PI / 180.0, 2.0 * M_PI, 2.0 * M_PI,
-      2.0 * M_PI;
+  q_max << 6.28319, 6.28319, 3.1415, 6.28319, 6.28319, 6.28319;
 
   // 속도 한계 [rad/s]: 각 관절별 최대 속도
   // One-step MPPI에서는 u = q_dot이므로, q_dot_max가 제어 한계

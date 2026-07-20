@@ -24,8 +24,7 @@
 // Convention:
 //   - q is a 6-DOF joint posture [rad].
 //   - The end-effector pose is induced by the manipulator FK.
-//   - These are not IK-solved poses for a specific URDF. They are benchmark
-//     postures for the included RB5-like DH model.
+//   - These are benchmark postures evaluated with the UR5e DH model.
 // =============================================================================
 
 namespace manipulator_pose_set {

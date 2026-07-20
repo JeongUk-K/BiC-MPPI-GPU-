@@ -9,7 +9,13 @@
 
 namespace rollout_ee_export {
 
-constexpr double kCoordinateScale = 1.0e-3;
+#ifndef ROLLOUT_EE_COORDINATE_SCALE
+#define ROLLOUT_EE_COORDINATE_SCALE 1.0e-3
+#endif
+// The offline 0.02 s archive keeps its 1 mm scale. Online controllers with a
+// larger discretization may override this at compile time so an int8 delta can
+// represent the larger EE displacement between adjacent samples.
+constexpr double kCoordinateScale = ROLLOUT_EE_COORDINATE_SCALE;
 
 __device__ __forceinline__ std::int16_t quantizeCoordinate(double value) {
   double scaled = nearbyint(value / kCoordinateScale);
@@ -150,10 +156,21 @@ inline void emit(const RolloutEEBatchCallback &callback,
                         sizeof(unsigned int), cudaMemcpyDeviceToHost));
   CUDA_CHECK(cudaFree(device_overflow_count));
   if (overflow_count != 0) {
+#ifdef ROLLOUT_EE_CLAMP_OVERFLOW
+    static bool overflow_warning_emitted = false;
+    if (!overflow_warning_emitted) {
+      fprintf(stderr,
+              "rollout EE delta overflow: clamping out-of-range visualization "
+              "values at scale %.7f (warning shown once)\n",
+              kCoordinateScale);
+      overflow_warning_emitted = true;
+    }
+#else
     fprintf(stderr,
             "rollout EE delta overflow: %u values exceed int8 at scale %.7f\n",
             overflow_count, kCoordinateScale);
     exit(EXIT_FAILURE);
+#endif
   }
   std::vector<std::uint8_t> host_positions(packed_size);
   CUDA_CHECK(cudaMemcpy(host_positions.data(), device_packed, packed_size,

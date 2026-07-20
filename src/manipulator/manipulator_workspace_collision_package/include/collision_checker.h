@@ -143,10 +143,10 @@ private:
 
   static std::vector<Eigen::Vector3d> manipulatorJointPositions(const Eigen::VectorXd &x) {
     constexpr int kDof = 6;
-    const double L2 = 0.427;
-    const double L3 = 0.357;
+    const double L2 = 0.425;
+    const double L3 = 0.392;
     const double dh_a[kDof] = {0.0, -L2, -L3, 0.0, 0.0, 0.0};
-    const double dh_d[kDof] = {0.15, 0.0, 0.0, 0.11, 0.09, 0.09};
+    const double dh_d[kDof] = {0.163, 0.0, 0.0, 0.127, 0.1, 0.1};
     const double dh_alpha[kDof] = {M_PI / 2.0, 0.0, 0.0, M_PI / 2.0, -M_PI / 2.0, 0.0};
 
     std::vector<Eigen::Vector3d> pts;
