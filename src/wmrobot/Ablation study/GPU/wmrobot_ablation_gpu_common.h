@@ -2,6 +2,7 @@
 
 #include <bi_mppi_gpu.cuh>
 #include <cluster_mppi_gpu.cuh>
+#include <log_mppi_gpu.cuh>
 #include <mppi_gpu.cuh>
 #include <wmrobot_map.h>
 
@@ -24,6 +25,7 @@
 
 enum class GpuAblationVariant {
   MPPI,
+  LogMPPI,
   ClusterMPPI,
   BiCNoGuide,
   BiCNoBackward,
@@ -134,6 +136,8 @@ inline std::string gpuVariantFileToken(GpuAblationVariant variant) {
   switch (variant) {
   case GpuAblationVariant::MPPI:
     return "mppi";
+  case GpuAblationVariant::LogMPPI:
+    return "log_mppi";
   case GpuAblationVariant::ClusterMPPI:
     return "cluster_mppi";
   case GpuAblationVariant::BiCNoGuide:
@@ -152,6 +156,8 @@ inline std::string gpuVariantLabel(GpuAblationVariant variant) {
   switch (variant) {
   case GpuAblationVariant::MPPI:
     return "MPPI";
+  case GpuAblationVariant::LogMPPI:
+    return "Log-MPPI";
   case GpuAblationVariant::ClusterMPPI:
     return "Cluster-MPPI";
   case GpuAblationVariant::BiCNoGuide:
@@ -891,6 +897,15 @@ runGpuAblationVariant(GpuAblationVariant variant,
       GpuAblationRunResult row;
       if (variant == GpuAblationVariant::MPPI) {
         MPPI_GPU solver(model);
+        auto param = makeGpuMppiParam(config, start, target);
+        solver.U_0 = Eigen::MatrixXd::Zero(model.dim_u, param.T);
+        solver.init(param);
+        solver.setSeed(run_seed);
+        solver.setCollisionChecker(&collision_checker);
+        row = runGpuOneDirectionalSolver(variant, solver, collision_checker,
+                                         target, config, start_case, map_id);
+      } else if (variant == GpuAblationVariant::LogMPPI) {
+        LogMPPI_GPU solver(model);
         auto param = makeGpuMppiParam(config, start, target);
         solver.U_0 = Eigen::MatrixXd::Zero(model.dim_u, param.T);
         solver.init(param);

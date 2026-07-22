@@ -22,6 +22,7 @@
 
 enum class SameBudgetMethod {
   MPPI,
+  LogMPPI,
   ClusterMPPI,
   BiCRawConnect,
   FullBiC,
@@ -48,7 +49,9 @@ struct SameBudgetConfig {
   std::uint_fast64_t seed = 1;
   std::string dataset_dir = "../BARN_dataset/txt_files";
   std::string out_dir = "../results/sampling_budget_scaling";
-  std::string guide_budget_policy = "proportional";
+  // Match src/wmrobot/gpu/bi_mppi.cpp: Nr is half of Nf/Nb
+  // (Nf=Nb=6000, Nr=3000 in the reference B6000 configuration).
+  std::string guide_budget_policy = "gpu_ratio";
   int fixed_guide_budget = 6000;
   std::string git_commit = "unknown";
   bool overwrite = false;
@@ -141,20 +144,29 @@ inline std::pair<double, double> sameBudgetWilsonCi(int success, int total) {
 inline std::vector<SameBudgetMethodSpec> sameBudgetAllMethods() {
   return {
       {SameBudgetMethod::MPPI, GpuAblationVariant::MPPI, "MPPI", false, false},
+      {SameBudgetMethod::LogMPPI, GpuAblationVariant::LogMPPI, "Log-MPPI",
+       false, false},
       {SameBudgetMethod::ClusterMPPI, GpuAblationVariant::ClusterMPPI,
        "Cluster-MPPI", false, false},
-      {SameBudgetMethod::BiCRawConnect, GpuAblationVariant::BiCNoClustering,
-       "BiC-RawConnect", true, true},
       {SameBudgetMethod::FullBiC, GpuAblationVariant::FullBiC,
-       "Full BiC-MPPI", true, true},
+       "BiC-MPPI", true, true},
   };
 }
 
 inline SameBudgetMethodSpec sameBudgetMethodSpec(SameBudgetMethod method) {
-  for (const auto &spec : sameBudgetAllMethods()) {
-    if (spec.method == method) {
-      return spec;
-    }
+  switch (method) {
+  case SameBudgetMethod::MPPI:
+    return {method, GpuAblationVariant::MPPI, "MPPI", false, false};
+  case SameBudgetMethod::LogMPPI:
+    return {method, GpuAblationVariant::LogMPPI, "Log-MPPI", false, false};
+  case SameBudgetMethod::ClusterMPPI:
+    return {method, GpuAblationVariant::ClusterMPPI, "Cluster-MPPI", false,
+            false};
+  case SameBudgetMethod::BiCRawConnect:
+    return {method, GpuAblationVariant::BiCNoClustering, "BiC-RawConnect",
+            true, true};
+  case SameBudgetMethod::FullBiC:
+    return {method, GpuAblationVariant::FullBiC, "BiC-MPPI", true, true};
   }
   throw std::runtime_error("unknown same-budget method");
 }
@@ -178,7 +190,7 @@ inline void sameBudgetPrintUsage(const char *argv0) {
       << "  --start-cases N            Number of start states per map\n"
       << "  --maxiter N                Max closed-loop iterations\n"
       << "  --out DIR                  Output directory\n"
-      << "  --guide-budget-policy proportional|fixed_6000\n"
+      << "  --guide-budget-policy gpu_ratio|proportional|fixed_6000\n"
       << "  --fixed-guide-budget N     Guide samples for fixed policy\n"
       << "  --smoke                    Tiny validation run\n"
       << "  --overwrite                Replace existing CSV outputs\n";
@@ -255,10 +267,11 @@ inline SameBudgetConfig parseSameBudgetArgs(int argc, char **argv) {
   config.budgets.erase(std::unique(config.budgets.begin(), config.budgets.end()),
                        config.budgets.end());
 
-  if (config.guide_budget_policy != "proportional" &&
+  if (config.guide_budget_policy != "gpu_ratio" &&
+      config.guide_budget_policy != "proportional" &&
       config.guide_budget_policy != "fixed_6000") {
     throw std::runtime_error(
-        "--guide-budget-policy must be proportional or fixed_6000");
+        "--guide-budget-policy must be gpu_ratio, proportional, or fixed_6000");
   }
   return config;
 }
@@ -266,6 +279,9 @@ inline SameBudgetConfig parseSameBudgetArgs(int argc, char **argv) {
 inline int sameBudgetGuideSamples(const SameBudgetConfig &config, int budget) {
   if (config.guide_budget_policy == "fixed_6000") {
     return config.fixed_guide_budget;
+  }
+  if (config.guide_budget_policy == "gpu_ratio") {
+    return std::max(1, budget / 2);
   }
   return budget;
 }
@@ -294,7 +310,7 @@ inline void sameBudgetWriteRawHeader(std::ostream &csv) {
   csv << "method,budget_label,Ns,Nf,Nb,Ng,T,Tf,Tb,map_id,start_id,seed,"
          "success,failure_reason,iterations,elapsed_total_s,elapsed_rollout_s,"
          "elapsed_clustering_s,elapsed_connection_s,elapsed_guide_s,"
-         "final_cost,path_length,notes\n";
+         "final_goal_distance,path_length,notes\n";
 }
 
 inline std::string sameBudgetFailureReason(const GpuAblationRunResult &row,
@@ -465,6 +481,12 @@ inline void sameBudgetWriteMetadata(const SameBudgetConfig &config,
        << "},\n";
   json << "  \"guide_budget_policy\": \"" << config.guide_budget_policy
        << "\",\n";
+  json << "  \"reference\": {\"source\": \"src/wmrobot/gpu\", "
+          "\"dt\": 0.1, \"gamma_u\": 10.0, "
+          "\"sigma_u\": [0.6, 0.6], \"goal_tolerance\": 0.1},\n";
+  json << "  \"budget_allocation\": {\"one_directional\": \"N=B\", "
+          "\"bidirectional_primary\": \"Nf=Nb=B\", "
+          "\"guide_policy\": \"" << config.guide_budget_policy << "\"},\n";
   json << "  \"methods\": [";
   for (std::size_t i = 0; i < methods.size(); ++i) {
     if (i) {

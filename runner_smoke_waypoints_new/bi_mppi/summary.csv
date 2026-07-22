@@ -1,0 +1,2 @@
+solver,solver_label,scenario,map_ids,success,is_collision,iter,reached_waypoints,total_waypoints,elapsed,elapsed_rollout,elapsed_clustering,elapsed_connection,elapsed_guide,final_error,path_points
+"bi_mppi","BiC-MPPI (parallel rollout)",0,"93;76;51;52;129",0,0,60,2,12,0.678374787,0.218941719,0.367788434,0.002206303,0.089438331,21.82279116,61

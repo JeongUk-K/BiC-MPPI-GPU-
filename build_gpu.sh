@@ -458,6 +458,7 @@ case "$TARGET_GROUP" in
         # ---- WMRobot Sampling-Budget Scaling GPU 버전 ----
         BUILD_PREFIX="wmrobot_same_budget_"
         build_target "src/wmrobot/gpu same budget/mppi.cpp"
+        build_target "src/wmrobot/gpu same budget/log_mppi.cpp"
         build_target "src/wmrobot/gpu same budget/cluster_mppi.cpp"
         build_target "src/wmrobot/gpu same budget/bic_raw_connect.cpp"
         build_target "src/wmrobot/gpu same budget/full_bic_mppi.cpp"
@@ -561,6 +562,7 @@ elif [ "$TARGET_GROUP" = "wmrobot_accel" ]; then
 elif [ "$TARGET_GROUP" = "wmrobot_same_budget" ]; then
     echo "실행: cd build && ./gpu/wmrobot_same_budget_all --smoke"
     echo "      cd build && ./gpu/wmrobot_same_budget_mppi --smoke"
+    echo "      cd build && ./gpu/wmrobot_same_budget_log_mppi --smoke"
     echo "      cd build && ./gpu/wmrobot_same_budget_full_bic_mppi --smoke"
 elif [ "$TARGET_GROUP" = "wmrobot_waypoint" ]; then
     echo "실행: cd build && ./gpu/wmrobot_waypoint_comparison --smoke --overwrite"

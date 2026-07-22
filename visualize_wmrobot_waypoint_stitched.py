@@ -353,7 +353,14 @@ def plot_paths_for_scenario(root, paths, summary, scenario, out_path):
     if summary_by_solver:
         map_ids = next(iter(summary_by_solver.values())).get("map_ids", "")
     ax.set_title(f"WMRobot stitched BARN scenario {scenario:02d}  |  maps {map_ids}")
-    ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.34), ncol=2, frameon=False)
+    ax.legend(
+        loc="upper center",
+        bbox_to_anchor=(0.5, -0.52),
+        ncol=4,
+        frameon=False,
+        fontsize=8.5,
+        columnspacing=1.4,
+    )
     fig.tight_layout()
     fig.savefig(out_path, dpi=180)
     plt.close(fig)

@@ -259,7 +259,7 @@ def summarize_regular_rows(rows, source, group, fallback_variant):
                      "connection_s")
         append_first(guide, "elapsed_guide", "elapsed_guide_s", "guide_s")
         append_first(f_err, "f_err")
-        append_first(final_error, "d_goal", "final_error", "final_cost")
+        append_first(final_error, "d_goal", "final_error", "final_goal_distance", "final_cost")
 
     n = len(rows)
     n_success = sum(1 for v in successes if v)

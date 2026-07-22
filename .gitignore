@@ -6,5 +6,4 @@ EigenRand/
 BARN_dataset/
 results/
 result/
-random_pose_benchmark/
-runner_smoke_waypoints_new/
+save/

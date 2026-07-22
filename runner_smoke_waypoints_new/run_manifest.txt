@@ -1,0 +1,5 @@
+runner=./run_waypoints.sh
+cwd=/home/cora-tuf/MPPI/BiC-MPPI-legacy
+git_commit=71d85bb
+created_at=2026-06-17T11:36:24+09:00
+command=./run_waypoints.sh --scenario sequential_variants --no-build --overwrite --smoke --no-viz --out results/runner_smoke_waypoints_new 
