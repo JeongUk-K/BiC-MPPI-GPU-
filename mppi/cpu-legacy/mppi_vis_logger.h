@@ -4,7 +4,9 @@
 
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <string>
 #include <sys/stat.h>
@@ -42,11 +44,13 @@ public:
             const Eigen::VectorXd &x_init, const Eigen::VectorXd &x_target) {
     if (!enabled)
       return;
-    this->base_dir = "vis_data/" + solver_name;
+    const char *vis_root = std::getenv("MPPI_VIS_ROOT");
+    const std::string root = vis_root && *vis_root ? vis_root : "vis_data";
+    this->base_dir = root + "/" + solver_name;
     this->dim_x = dim_x;
     this->T = T;
 
-    mkdirp("vis_data");
+    mkdirp(root);
     mkdirp(base_dir);
 
     // Save metadata
@@ -69,6 +73,11 @@ public:
       meta << (i ? " " : "") << x_target(i);
     meta << "\n";
     meta.close();
+
+    // One row per solver iteration.  The trajectory in optimal.bin and this
+    // file share the same iteration number.
+    std::ofstream optimal_cost(base_dir + "/optimal_cost.csv");
+    optimal_cost << "iter,cost\n";
 
     // Save map as binary: rows x cols doubles
     {
@@ -132,6 +141,13 @@ public:
     f.write((const char *)&n, 4);
     for (double c : costs)
       f.write((const char *)&c, 8);
+  }
+
+  void saveOptimalCost(double cost) {
+    if (!enabled)
+      return;
+    std::ofstream f(base_dir + "/optimal_cost.csv", std::ios::app);
+    f << current_step << ',' << std::setprecision(17) << cost << '\n';
   }
 
 private:

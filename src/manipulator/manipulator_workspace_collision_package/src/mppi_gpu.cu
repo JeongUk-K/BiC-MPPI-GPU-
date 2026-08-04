@@ -19,7 +19,10 @@ static void safe_cuda_free(double *&p) {
 
 MPPI_GPU::~MPPI_GPU() {
   freeGPU();
-  curandDestroyGenerator(curand_gen);
+  if (curand_gen) {
+    curandDestroyGenerator(curand_gen);
+    curand_gen = nullptr;
+  }
 }
 
 void MPPI_GPU::init(MPPIParam param) {
@@ -184,6 +187,11 @@ void MPPI_GPU::uploadState() {
 }
 
 void MPPI_GPU::generateNoise() {
+  if (!curand_gen) {
+    CURAND_CHECK(curandCreateGenerator(&curand_gen, CURAND_RNG_PSEUDO_PHILOX4_32_10));
+    CURAND_CHECK(curandSetPseudoRandomGeneratorSeed(
+        curand_gen, static_cast<unsigned long long>(std::time(nullptr))));
+  }
   size_t count = static_cast<size_t>(N) * dim_u * T;
   if (count % 2 != 0) {
     ++count;

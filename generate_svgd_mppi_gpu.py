@@ -545,5 +545,5 @@ void SVGDMPPI_GPU::concatenate() {}
 void SVGDMPPI_GPU::partitioningControl() {}
 """
 
-with open("mppi/cuda/svgd_mppi_gpu.cu", "w") as f:
+with open("mppi/cuda-accel/svgd_mppi_gpu.cu", "w") as f:
     f.write(content)

@@ -118,14 +118,13 @@ MPPI_GPU::MPPI_GPU(ModelClass model) {
   d_x_init = d_x_target = d_sigma = nullptr;
   d_map = d_circles = d_rects = nullptr;
   n_circles = n_rects = 0;
-  with_map = false;
-
-  CURAND_CHECK(curandCreateGenerator(&curand_gen, CURAND_RNG_PSEUDO_DEFAULT));
-  CURAND_CHECK(curandSetPseudoRandomGeneratorSeed(
-      curand_gen, static_cast<unsigned long long>(std::time(nullptr))));
+  curand_gen = nullptr;
 }
 
 inline void MPPI_GPU::setSeed(std::uint_fast64_t seed) {
+  if (!curand_gen) {
+    CURAND_CHECK(curandCreateGenerator(&curand_gen, CURAND_RNG_PSEUDO_PHILOX4_32_10));
+  }
   CURAND_CHECK(curandSetPseudoRandomGeneratorSeed(
       curand_gen, static_cast<unsigned long long>(seed)));
 }

@@ -12,6 +12,7 @@
 #include <ctime>
 #include <deque>
 #include <map>
+#include <limits>
 #include <numeric>
 #include <typeinfo>
 #include <vector>
@@ -20,7 +21,7 @@
 // BiMPPI_GPU — Bidirectional MPPI with GPU rollout
 //
 // Forward/backward rollout + guide MPPI on GPU.
-// fastsc K-means runs on GPU; selectConnection and concatenate stay on CPU.
+// Clustering is selectable between CPU DBSCAN and fastsc GPU K-means.
 // ============================================================
 class BiMPPI_GPU {
 public:
@@ -53,6 +54,9 @@ public:
   Eigen::MatrixXd Uo;
   Eigen::MatrixXd Xo;
   Eigen::VectorXd u0;
+  double cost = std::numeric_limits<double>::quiet_NaN();
+
+  double trajectoryCost() const { return cost; }
 
   // Timing
   std::chrono::time_point<std::chrono::high_resolution_clock> start, finish;
@@ -69,9 +73,11 @@ protected:
   std::vector<double> sigma_diag;
   double deviation_mu, cost_mu, epsilon;
   int minpts;
-  int kmeans_clusters, kmeans_max_iterations;
-  double kmeans_threshold;
   double psi;
+  ClusteringMethod clustering_method = ClusteringMethod::DBSCAN;
+  int kmeans_clusters = 5;
+  int kmeans_max_iterations = 100;
+  double kmeans_threshold = 1e-6;
   ConnectionMetric connection_metric = ConnectionMetric::Euclidean;
   double se2_connection_xy_weight = 0.2;
   double se2_connection_theta_weight = 1.0;
@@ -127,8 +133,20 @@ protected:
   void freeCommon();
   void uploadCollisionData();
 
+  void launchBackwardSampling();
+  void launchForwardSampling();
   void backwardRollout();
   void forwardRollout();
+  void clusterControlsDevice(const double *device_controls,
+                             const double *device_costs, int sample_count,
+                             int horizon, Eigen::MatrixXd &clustered_controls,
+                             std::vector<std::vector<int>> &clusters);
+  void appendDeviceVisRolloutSamples(const double *device_controls,
+                                     int sample_count, int horizon,
+                                     bool backward);
+  Eigen::MatrixXd reduceControlsDevice(const double *device_controls,
+                                      const double *device_costs,
+                                      int sample_count, int horizon);
   void backwardRawRollout(Eigen::VectorXd &costs, Eigen::MatrixXd &Ui_cpu);
   void forwardRawRollout(Eigen::VectorXd &costs, Eigen::MatrixXd &Ui_cpu);
   void appendVisRolloutSamples(const Eigen::MatrixXd &Ui_cpu, int N_samples,
@@ -141,6 +159,9 @@ protected:
   void guideMPPI();
   void partitioningControl();
 
+  void dbscan(std::vector<std::vector<int>> &clusters,
+              const Eigen::MatrixXd &Di, const Eigen::VectorXd &costs,
+              int N_samples);
   void kmeansCluster(std::vector<std::vector<int>> &clusters,
                      const Eigen::MatrixXd &feature_source,
                      const Eigen::VectorXd &costs, int N_samples);
@@ -148,6 +169,7 @@ protected:
                   const std::vector<std::vector<int>> &clusters,
                   const Eigen::VectorXd &costs, const Eigen::MatrixXd &Ui_cpu,
                   int T_steps);
+  double evaluateTrajectoryCost(const Eigen::MatrixXd &trajectory) const;
 };
 
 template <typename ModelClass> BiMPPI_GPU::BiMPPI_GPU(ModelClass model) {
@@ -170,13 +192,13 @@ template <typename ModelClass> BiMPPI_GPU::BiMPPI_GPU(ModelClass model) {
   with_map = false;
   alloc_Nf = alloc_Nb = alloc_Tf = alloc_Tb = 0;
   alloc_Tr_guide = 0;
-
-  CURAND_CHECK(curandCreateGenerator(&curand_gen, CURAND_RNG_PSEUDO_DEFAULT));
-  CURAND_CHECK(curandSetPseudoRandomGeneratorSeed(
-      curand_gen, static_cast<unsigned long long>(std::time(nullptr))));
+  curand_gen = nullptr;
 }
 
 inline void BiMPPI_GPU::setSeed(std::uint_fast64_t seed) {
+  if (!curand_gen) {
+    CURAND_CHECK(curandCreateGenerator(&curand_gen, CURAND_RNG_PSEUDO_PHILOX4_32_10));
+  }
   CURAND_CHECK(curandSetPseudoRandomGeneratorSeed(
       curand_gen, static_cast<unsigned long long>(seed)));
 }

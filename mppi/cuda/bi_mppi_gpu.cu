@@ -727,12 +727,9 @@ void BiMPPI_GPU::selectConnection() {
         for(int cb_=0;cb_<(int)clusters_b.size();++cb_)
             for(int df__=0;df__<=Tf;++df__)
                 for(int db__=0;db__<=Tb;++db__){
-                    double n=(Xf.block(cf*dim_x,df__,dim_x,1)-Xb.block(cb_*dim_x,db__,dim_x,1)).norm();
-                    if (connection_metric == ConnectionMetric::SE2) {
-                        n = connectionMetricDistance(
-                            Xf.block(cf * dim_x, df__, dim_x, 1),
-                            Xb.block(cb_ * dim_x, db__, dim_x, 1));
-                    }
+                    const double n = connectionMetricDistance(
+                        Xf.block(cf * dim_x, df__, dim_x, 1),
+                        Xb.block(cb_ * dim_x, db__, dim_x, 1));
                     if(n<mn){mn=n;cb=cb_;df_=df__;db_=db__;}
                 }
         joints.push_back({cf,cb,df_,db_});
@@ -750,14 +747,9 @@ double BiMPPI_GPU::connectionDistance() const {
             df > Tf || db > Tb) {
             continue;
         }
-        double distance = (Xf.block(cf * dim_x, df, dim_x, 1) -
-                           Xb.block(cb * dim_x, db, dim_x, 1))
-                              .norm();
-        if (connection_metric == ConnectionMetric::SE2) {
-            distance = connectionMetricDistance(
-                Xf.block(cf * dim_x, df, dim_x, 1),
-                Xb.block(cb * dim_x, db, dim_x, 1));
-        }
+        const double distance = connectionMetricDistance(
+            Xf.block(cf * dim_x, df, dim_x, 1),
+            Xb.block(cb * dim_x, db, dim_x, 1));
         total += distance;
         ++count;
     }

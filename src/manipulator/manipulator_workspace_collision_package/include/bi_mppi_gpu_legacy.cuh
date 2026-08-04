@@ -2,12 +2,15 @@
 
 #include "collision_checker.h"
 #include "cuda_utils.cuh"
+#include "mppi_vis_logger.h"
 #include "model_base.h"
 #include "mppi_param.h"
-#include "mppi_vis_logger.h"
+#include "rollout_ee_callback.h"
+#include "rollout_state_callback.h"
 
 #include <Eigen/Dense>
 #include <chrono>
+#include <cstdint>
 #include <ctime>
 #include <deque>
 #include <map>
@@ -16,27 +19,36 @@
 #include <vector>
 
 // ============================================================
-// SVGDMPPI_GPU
+// BiMPPI_GPU_Legacy — original bidirectional MPPI implementation
 //
-// SVGD-MPPI GPU 가속 버전.
-// 아키텍처:
-//   - Forward / Backward rollout의 비용 평가 → GPU 커널
-//   - SVGD surrogate gradient step → GPU 커널 (particle별 병렬)
-//   - DBSCAN 또는 fastsc GPU K-means 클러스터링
+// Forward/backward rollout + guide MPPI on GPU.
+// DBSCAN, selectConnection, concatenate stay on CPU.
 // ============================================================
-class SVGDMPPI_GPU {
+class BiMPPI_GPU_Legacy {
 public:
-  template <typename ModelClass> SVGDMPPI_GPU(ModelClass model);
-  ~SVGDMPPI_GPU();
+  template <typename ModelClass> BiMPPI_GPU_Legacy(ModelClass model);
+  ~BiMPPI_GPU_Legacy();
 
-  void init(SVGDMPPIParam param);
+  void init(BiMPPIParam param);
   void setCollisionChecker(CollisionChecker *cc);
+  void setSeed(std::uint_fast64_t seed);
   void solve();
   void move();
   double connectionDistance() const;
+  void guideReference(const Eigen::MatrixXd &Uref,
+                      const Eigen::MatrixXd &Xref);
   void setVisLogger(MPPIVisLogger *logger) { vis_logger = logger; }
+  void setClusteringMethod(ClusteringMethod method) {
+    clustering_method = method;
+  }
+  void setRolloutEECallback(RolloutEEBatchCallback callback) {
+    rollout_ee_callback = std::move(callback);
+  }
+  void setRolloutStateCallback(RolloutStateBatchCallback callback) {
+    rollout_state_callback = std::move(callback);
+  }
 
-  // ── 공개 상태 (CPU BiMPPI와 동일 인터페이스) ──
+  // ---- Public state (mirrors CPU BiMPPI) ----
   Eigen::MatrixXd U_f0; // dim_u x Tf
   Eigen::MatrixXd U_b0; // dim_u x Tb
   Eigen::VectorXd x_init;
@@ -57,23 +69,22 @@ protected:
   int dim_x, dim_u;
   float dt;
   int Tf, Tb, Nf, Nb, Nr;
-  int Ns;    // surrogate samples
-  int istep; // SVGD inner iterations
-
   double gamma_u;
-  std::vector<double> sigma_diag; // diagonal of sigma_u
-
-  double deviation_mu, epsilon, psi, cost_mu;
+  std::vector<double> sigma_diag;
+  double deviation_mu, cost_mu, epsilon;
   int minpts;
+  double psi;
   ClusteringMethod clustering_method = ClusteringMethod::DBSCAN;
   int kmeans_clusters = 5;
   int kmeans_max_iterations = 100;
   double kmeans_threshold = 1e-6;
 
-  CollisionChecker *collision_checker{nullptr};
+  CollisionChecker *collision_checker;
   MPPIVisLogger *vis_logger = nullptr;
+  RolloutEEBatchCallback rollout_ee_callback;
+  RolloutStateBatchCallback rollout_state_callback;
 
-  // CPU-side cluster / traj data
+  // CPU cluster data
   std::vector<std::vector<int>> clusters_f, clusters_b;
   std::vector<int> full_cluster_f, full_cluster_b;
   Eigen::MatrixXd Uf, Ub, Xf, Xb;
@@ -81,25 +92,29 @@ protected:
   std::vector<Eigen::MatrixXd> Xc, Uc;
   std::vector<Eigen::MatrixXd> Ur, Xr;
   std::vector<double> Cr;
+  std::vector<Eigen::MatrixXd> vis_rollout_samples;
+  static constexpr int kMaxSavedBiRollouts = 128;
+  int vis_rollout_samples_per_call = 64;
 
-  // GPU buffers – forward
-  double *d_Uf0, *d_Ufi, *d_noise_f, *d_costs_f, *d_Di_f;
-  double *d_noise_samples_f, *d_sample_costs_f, *d_cov_acc_f;
-  // GPU buffers – backward
-  double *d_Ub0, *d_Ubi, *d_noise_b, *d_costs_b, *d_Di_b;
-  double *d_noise_samples_b, *d_sample_costs_b, *d_cov_acc_b;
-  // GPU buffers – guide
-  double *d_Ur0, *d_Uri, *d_noise_r, *d_costs_r, *d_Xref;
-  // shared
+  // GPU buffers (forward)
+  double *d_Uf0, *d_Ufi, *d_noise_f, *d_costs_f, *d_Uf_out, *d_Di_f;
+  // GPU buffers (backward)
+  double *d_Ub0, *d_Ubi, *d_noise_b, *d_costs_b, *d_Ub_out, *d_Di_b;
+  // GPU buffers (guide)
+  double *d_Ur0, *d_Uri, *d_noise_r, *d_costs_r, *d_Ur_out, *d_Xref;
+
   double *d_x_init, *d_x_target, *d_sigma;
-  // collision
-  double *d_map, *d_circles, *d_rects;
-  int map_max_row, map_max_col, n_circles, n_rects;
-  double map_resolution;
-  bool with_map;
 
+  // Collision
+  double *d_map, *d_circles, *d_rects, *d_ws_boxes;
+  int map_max_row, map_max_col, n_circles, n_rects, n_ws_boxes;
+  double map_resolution;
+  double ws_link_radius, ws_safe_margin, ws_hard_margin;
+  bool with_map;
   curandGenerator_t curand_gen;
-  int alloc_Nf, alloc_Nb, alloc_Tf, alloc_Tb;
+
+  int alloc_Nf, alloc_Nb, alloc_Tf, alloc_Tb; // last allocated sizes
+  int alloc_Tr_guide;
 
   // ---- Model-independent callbacks & type ----
   int model_type;
@@ -108,30 +123,36 @@ protected:
   std::function<double(Eigen::VectorXd, Eigen::VectorXd)> p;
   std::function<void(Eigen::Ref<Eigen::MatrixXd>)> h;
 
-  // GPU 메모리 관리
   void allocForward();
   void allocBackward();
   void allocGuide();
+  void allocGuideFor(int Tr);
   void freeForward();
   void freeBackward();
   void freeGuide();
   void freeCommon();
   void uploadCollisionData();
 
-  // 핵심 단계
-  void forwardRollout();
+  void launchBackwardSampling();
+  void launchForwardSampling();
   void backwardRollout();
+  void forwardRollout();
+  void backwardRawRollout(Eigen::VectorXd &costs, Eigen::MatrixXd &Ui_cpu);
+  void forwardRawRollout(Eigen::VectorXd &costs, Eigen::MatrixXd &Ui_cpu);
+  void appendVisRolloutSamples(const Eigen::MatrixXd &Ui_cpu, int N_samples,
+                               int T_steps, bool backward);
   void selectConnection();
   void concatenate();
   void guideMPPI();
+  void guideMPPIDevice();
+  void guideMPPIImpl(bool device_reduction);
   void partitioningControl();
 
-  // CPU 클러스터링 (DBSCAN)
   void dbscan(std::vector<std::vector<int>> &clusters,
               const Eigen::MatrixXd &Di, const Eigen::VectorXd &costs,
               int N_samples);
   void kmeansCluster(std::vector<std::vector<int>> &clusters,
-                     const Eigen::MatrixXd &feature,
+                     const Eigen::MatrixXd &feature_source,
                      const Eigen::VectorXd &costs, int N_samples);
   void calculateU(Eigen::MatrixXd &Uout,
                   const std::vector<std::vector<int>> &clusters,
@@ -139,8 +160,7 @@ protected:
                   int T_steps);
 };
 
-// ── 템플릿 생성자 ─────────────────────────────────────────────
-template <typename ModelClass> SVGDMPPI_GPU::SVGDMPPI_GPU(ModelClass model) {
+template <typename ModelClass> BiMPPI_GPU_Legacy::BiMPPI_GPU_Legacy(ModelClass model) {
   dim_x = model.dim_x;
   dim_u = model.dim_u;
   this->f = model.f;
@@ -151,17 +171,22 @@ template <typename ModelClass> SVGDMPPI_GPU::SVGDMPPI_GPU(ModelClass model) {
   model_type =
       legacy_cuda_model_type_from_name(typeid(ModelClass).name(), dim_x, dim_u);
 
-  d_Uf0 = d_Ufi = d_noise_f = d_costs_f = d_Di_f = nullptr;
-  d_Ub0 = d_Ubi = d_noise_b = d_costs_b = d_Di_b = nullptr;
+  d_Uf0 = d_Ufi = d_noise_f = d_costs_f = d_Uf_out = d_Di_f = nullptr;
+  d_Ub0 = d_Ubi = d_noise_b = d_costs_b = d_Ub_out = d_Di_b = nullptr;
+  d_Ur0 = d_Uri = d_noise_r = d_costs_r = d_Ur_out = d_Xref = nullptr;
   d_x_init = d_x_target = d_sigma = nullptr;
-  d_map = d_circles = d_rects = nullptr;
-  n_circles = n_rects = 0;
+  d_map = d_circles = d_rects = d_ws_boxes = nullptr;
+  n_circles = n_rects = n_ws_boxes = 0;
+  ws_link_radius = 0.045;
+  ws_safe_margin = 0.10;
+  ws_hard_margin = 0.0;
   with_map = false;
   alloc_Nf = alloc_Nb = alloc_Tf = alloc_Tb = 0;
+  alloc_Tr_guide = 0;
   curand_gen = nullptr;
 }
 
-inline void SVGDMPPI_GPU::setSeed(std::uint_fast64_t seed) {
+inline void BiMPPI_GPU_Legacy::setSeed(std::uint_fast64_t seed) {
   if (!curand_gen) {
     CURAND_CHECK(curandCreateGenerator(&curand_gen, CURAND_RNG_PSEUDO_PHILOX4_32_10));
   }

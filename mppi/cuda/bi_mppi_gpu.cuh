@@ -175,13 +175,13 @@ template <typename ModelClass> BiMPPI_GPU::BiMPPI_GPU(ModelClass model) {
   with_map = false;
   alloc_Nf = alloc_Nb = alloc_Tf = alloc_Tb = 0;
   alloc_Tr_guide = 0;
-
-  CURAND_CHECK(curandCreateGenerator(&curand_gen, CURAND_RNG_PSEUDO_DEFAULT));
-  CURAND_CHECK(curandSetPseudoRandomGeneratorSeed(
-      curand_gen, static_cast<unsigned long long>(std::time(nullptr))));
+  curand_gen = nullptr;
 }
 
 inline void BiMPPI_GPU::setSeed(std::uint_fast64_t seed) {
+  if (!curand_gen) {
+    CURAND_CHECK(curandCreateGenerator(&curand_gen, CURAND_RNG_PSEUDO_PHILOX4_32_10));
+  }
   CURAND_CHECK(curandSetPseudoRandomGeneratorSeed(
       curand_gen, static_cast<unsigned long long>(seed)));
 }

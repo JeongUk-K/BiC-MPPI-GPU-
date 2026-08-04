@@ -71,6 +71,7 @@ void MPPI_GPU::init(MPPIParam param) {
 
   u0 = Eigen::VectorXd::Zero(dim_u);
   Xo = Eigen::MatrixXd::Zero(dim_x, T + 1);
+  cost = std::numeric_limits<double>::quiet_NaN();
 
   allocGPU();
 }
@@ -174,6 +175,22 @@ void MPPI_GPU::uploadState() {
                         dim_x * sizeof(double), cudaMemcpyHostToDevice));
 }
 
+double MPPI_GPU::evaluateTrajectoryCost(
+    const Eigen::MatrixXd &trajectory) const {
+  if (trajectory.rows() != dim_x || trajectory.cols() == 0 || !p) {
+    return std::numeric_limits<double>::quiet_NaN();
+  }
+
+  double value = 0.0;
+  for (int t = 0; t < trajectory.cols(); ++t) {
+    value += p(trajectory.col(t), x_target);
+    if (collision_checker && collision_checker->getCollisionGrid(trajectory.col(t))) {
+      return 1e8;
+    }
+  }
+  return value;
+}
+
 void MPPI_GPU::generateNoise() {
   size_t count = (size_t)N * dim_u * T;
   // curand requires even count
@@ -244,6 +261,7 @@ void MPPI_GPU::solve() {
   for (int j = 0; j < T; ++j) {
     Xo.col(j + 1) = Xo.col(j) + (double)dt * f(Xo.col(j), Uo.col(j));
   }
+  cost = evaluateTrajectoryCost(Xo);
 
   // ── Visualization data export ──
   if (vis_logger && vis_logger->enabled) {
@@ -260,6 +278,7 @@ void MPPI_GPU::solve() {
     vis_logger->saveTrajectories("rollouts", sample_trajs);
     vis_logger->saveCosts("rollouts", sample_costs);
     vis_logger->saveTrajectory("optimal", Xo);
+    vis_logger->saveOptimalCost(cost);
     vis_logger->savePosition(x_init);
   }
 

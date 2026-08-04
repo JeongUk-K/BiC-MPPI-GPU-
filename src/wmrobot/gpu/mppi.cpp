@@ -31,18 +31,21 @@ bool looksLikeOption(const std::string &value) {
 }
 
 void printUsage(const char *argv0) {
-  std::cerr << "Usage: " << argv0 << " [options]\n"
-            << "Options:\n"
-            << "  --smoke              Run one tiny validation case\n"
-            << "  --map-begin N        First BARN map id. Default: 299\n"
-            << "  --num-maps N         Number of maps descending from map-begin. Default: 300\n"
-            << "  --start-cases N      Number of start cases. Default: 2\n"
-            << "  --maxiter N          Max closed-loop iterations. Default: 200\n"
-            << "  --T N                Horizon. Default: 100\n"
-            << "  --N N                Rollout count. Default: 10000\n"
-            << "  --dataset-dir DIR    BARN txt file directory\n"
-            << "  --vis-every N        Save rollout data every N iterations. Default: 1\n"
-            << "  --no-rollouts        Save CSV files only\n";
+  std::cerr
+      << "Usage: " << argv0 << " [options]\n"
+      << "Options:\n"
+      << "  --smoke              Run one tiny validation case\n"
+      << "  --map-begin N        First BARN map id. Default: 299\n"
+      << "  --num-maps N         Number of maps descending from map-begin. "
+         "Default: 300\n"
+      << "  --start-cases N      Number of start cases. Default: 2\n"
+      << "  --maxiter N          Max closed-loop iterations. Default: 200\n"
+      << "  --T N                Horizon. Default: 100\n"
+      << "  --N N                Rollout count. Default: 10000\n"
+      << "  --dataset-dir DIR    BARN txt file directory\n"
+      << "  --vis-every N        Save rollout data every N iterations. "
+         "Default: 1\n"
+      << "  --no-rollouts        Save CSV files only\n";
 }
 
 MppiConfig parseArgs(int argc, char **argv) {
@@ -118,11 +121,11 @@ int main(int argc, char **argv) {
   const std::string variant = "MPPI";
   std::vector<WmrobotGpuRunResult> runs;
 
-  std::ofstream csv("result_mppi.csv");
+  std::ofstream csv(wmrobotGpuResultPath("result_mppi.csv"));
   writeWmrobotGpuRunHeader(csv);
   csv.flush();
 
-  std::ofstream progress_csv("result_mppi_progress.csv");
+  std::ofstream progress_csv(wmrobotGpuResultPath("result_mppi_progress.csv"));
   writeWmrobotGpuRunHeader(progress_csv);
   progress_csv.flush();
   // for (int map = 299; map >= 0 ; --map) {
@@ -146,17 +149,16 @@ int main(int argc, char **argv) {
          map >= 0 && map > config.map_begin - config.num_maps; --map) {
       // for (int map = 0; map < 300; ++map) {
       CollisionChecker collision_checker = CollisionChecker();
-      collision_checker.loadMap(config.dataset_dir + "/output_" +
-                                    std::to_string(map) + ".txt",
-                                0.1);
+      collision_checker.loadMap(
+          config.dataset_dir + "/output_" + std::to_string(map) + ".txt", 0.1);
       Solver solver(model);
       solver.U_0 = Eigen::MatrixXd::Zero(model.dim_u, param.T);
       solver.init(param);
       solver.setCollisionChecker(&collision_checker);
 
       MPPIVisLogger vis_logger;
-      initWmrobotGpuVisLogger(vis_logger, config.save_rollouts, "mppi", s,
-                              map, model.dim_x, param.T, collision_checker,
+      initWmrobotGpuVisLogger(vis_logger, config.save_rollouts, "mppi", s, map,
+                              model.dim_x, param.T, collision_checker,
                               param.x_init, param.x_target);
       solver.setVisLogger(&vis_logger);
 
@@ -171,6 +173,7 @@ int main(int argc, char **argv) {
                                config.vis_every, row.iter);
         solver.solve();
         endWmrobotGpuVisStep(vis_logger);
+        row.cost = solver.trajectoryCost();
         solver.move();
 
         row.elapsed += solver.elapsed;
@@ -214,7 +217,7 @@ int main(int argc, char **argv) {
   progress_csv.close();
 
   const auto summary = summarizeWmrobotGpuRuns(variant, runs);
-  std::ofstream summary_csv("result_mppi_summary.csv");
+  std::ofstream summary_csv(wmrobotGpuResultPath("result_mppi_summary.csv"));
   writeWmrobotGpuSummaryHeader(summary_csv);
   writeWmrobotGpuSummaryRow(summary_csv, summary);
   return 0;

@@ -1,4 +1,6 @@
 #pragma once
+#ifndef CUDA_LEGACY_MODEL_CUH
+#define CUDA_LEGACY_MODEL_CUH
 
 #include <cmath>
 #include <cstring>
@@ -380,3 +382,5 @@ legacy_cuda_collision_grid(const double *x, bool with_map, const double *d_map,
   if (with_map) return legacy_cuda_collision_grid_map(x, d_map, max_row, max_col, resolution);
   return legacy_cuda_collision_grid_polygon(x, circles, n_circles, rects, n_rects);
 }
+
+#endif // CUDA_LEGACY_MODEL_CUH

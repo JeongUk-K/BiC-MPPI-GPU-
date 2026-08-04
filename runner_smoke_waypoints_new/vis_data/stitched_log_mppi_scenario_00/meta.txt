@@ -1,8 +1,0 @@
-solver=stitched_log_mppi_scenario_00
-dim_x=3
-T=100
-map_resolution=0.1
-map_rows=30
-map_cols=250
-x_init=1.5 0 1.5708
-x_target=1.5 25 1.5708

@@ -1,5 +1,0 @@
-source,group,variant,num_rows,num_runs,num_success,success_rate,num_collision,num_landed,landed_rate,avg_iter,avg_elapsed,avg_rollout,avg_clustering,avg_connection,avg_guide,avg_f_err,avg_final_error
-bi_mppi/summary.csv,bi_mppi,bi_mppi,1,1,0,0,0,,,60,0.678374787,0.218941719,0.367788434,0.002206303,0.089438331,nan,21.82279116
-cluster_mppi/summary.csv,cluster_mppi,cluster_mppi,1,1,0,0,0,,,60,0.098793944,0.036174255,0.062619689,0,0,nan,22.62036413
-log_mppi/summary.csv,log_mppi,log_mppi,1,1,0,0,0,,,60,0.039864864,0.039864864,0,0,0,nan,21.72477737
-mppi/summary.csv,mppi,mppi,1,1,0,0,0,,,60,0.038221445,0.038221445,0,0,0,nan,22.75742172

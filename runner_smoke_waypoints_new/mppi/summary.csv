@@ -1,2 +1,0 @@
-solver,solver_label,scenario,map_ids,success,is_collision,iter,reached_waypoints,total_waypoints,elapsed,elapsed_rollout,elapsed_clustering,elapsed_connection,elapsed_guide,final_error,path_points
-"mppi","MPPI",0,"93;76;51;52;129",0,0,60,2,12,0.038221445,0.038221445,0,0,0,22.75742172,61

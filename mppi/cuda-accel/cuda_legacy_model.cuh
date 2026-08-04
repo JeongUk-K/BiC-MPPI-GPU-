@@ -1,4 +1,6 @@
 #pragma once
+#ifndef CUDA_LEGACY_MODEL_CUH
+#define CUDA_LEGACY_MODEL_CUH
 
 #include <cmath>
 #include <cstring>
@@ -140,8 +142,8 @@ legacy_cuda_terminal_cost(const double *x, const double *x_target, int dim_x,
 }
 
 __device__ __forceinline__ void legacy_cuda_project_control(double *u, int dim_u,
-                                                            int T,
-                                                            int model_type) {
+                                                             int T,
+                                                             int model_type) {
   if (model_type == LEGACY_CUDA_QUADROTOR ||
       model_type == LEGACY_CUDA_QUADROTOR_PRECISION_LANDING) {
     for (int t = 0; t < T; ++t) {
@@ -268,3 +270,5 @@ legacy_cuda_collision_grid(const double *x, bool with_map, const double *d_map,
   return legacy_cuda_collision_grid_polygon(x, circles, n_circles, rects,
                                             n_rects);
 }
+
+#endif // CUDA_LEGACY_MODEL_CUH

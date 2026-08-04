@@ -18,6 +18,15 @@ This package extends the previous manipulator BiC-MPPI example from a q-space to
   - Provides a workspace-aware `DEFINE_FORWARD_ROLLOUT_KERNEL` macro.
 
 - `bi_mppi_gpu.cuh` / `src/bi_mppi_gpu.cu`
+  - Current GPU-resident K-means BiC-MPPI.
+  - Keeps feature construction, valid-sample filtering, K-means, and
+    cluster-weighted control reduction on the GPU.
+  - Reuses `mppi/cuda-accel/gpu_kmeans.cuh` and
+    `mppi/cuda-accel/gpu_control_reduction.cuh`; only the workspace/link
+    collision rollout kernels remain manipulator-specific.
+- `bi_mppi_gpu_legacy.cuh` / `src/bi_mppi_gpu_legacy.cu`
+  - Original implementation retained as `BiMPPI_GPU_Legacy`.
+  - Copies full sampled control batches to the CPU before clustering.
   - Adds GPU buffers for workspace boxes.
   - Uploads `CollisionChecker::workspace_boxes` to the device.
   - Passes workspace collision buffers to forward, backward, and guide kernels.
@@ -76,7 +85,8 @@ unless you replace the sampled-link approximation with analytic capsule/mesh col
 
 1. Back up your current repo.
 2. Copy `include/collision_checker.h`, `include/cuda_legacy_model.cuh`, and `include/mppi_gpu.cuh` into your project include directory.
-3. Patch or replace `bi_mppi_gpu.cuh` and `bi_mppi_gpu.cu` using the package versions.
+3. Copy both the current `bi_mppi_gpu.*` and preserved
+   `bi_mppi_gpu_legacy.*` implementations.
 4. Add the example target from `CMakeLists_fragment.txt`.
 5. Build and run `manipulator_bicmppi_workspace_example`.
 
@@ -93,6 +103,8 @@ cd build
 ./gpu/manipulator_logmppi_pinkNplace_workspace_example
 ./gpu/manipulator_clustermppi_pinkNplace_workspace_example
 ./gpu/manipulator_bicmppi_pinkNplace_workspace_example
+./gpu/manipulator_bicmppi_random_pose_benchmark
+./gpu/manipulator_bicmppi_legacy_random_pose_benchmark
 ```
 
 ## Expected outputs

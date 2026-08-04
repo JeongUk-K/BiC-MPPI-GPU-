@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <ctime>
 #include <iostream>
+#include <limits>
 #include <typeinfo>
 #include <vector>
 
@@ -39,6 +40,9 @@ public:
   Eigen::VectorXd x_target;
   Eigen::MatrixXd Uo;     // dim_u x T  optimal control
   Eigen::MatrixXd Xo;     // dim_x x (T+1)  optimal trajectory
+  double cost = std::numeric_limits<double>::quiet_NaN();
+
+  double trajectoryCost() const { return cost; }
 
   // ---- Timing (same fields as CPU version) ----
   std::chrono::time_point<std::chrono::high_resolution_clock> start, finish;
@@ -98,6 +102,7 @@ protected:
   virtual void generateNoise();  // fill d_noise with N(0,1)
   void launchRollout();          // kernel: rollout + cost per sample
   void weightedControlSum(Eigen::MatrixXd &Uo_out); // reduction → Uo
+  double evaluateTrajectoryCost(const Eigen::MatrixXd &trajectory) const;
 };
 
 // ---- Template constructor ----
@@ -119,13 +124,14 @@ MPPI_GPU::MPPI_GPU(ModelClass model) {
   d_map = d_circles = d_rects = nullptr;
   n_circles = n_rects = 0;
   with_map = false;
-
-  CURAND_CHECK(curandCreateGenerator(&curand_gen, CURAND_RNG_PSEUDO_DEFAULT));
-  CURAND_CHECK(curandSetPseudoRandomGeneratorSeed(
-      curand_gen, static_cast<unsigned long long>(std::time(nullptr))));
+  collision_checker = nullptr;
+  curand_gen = nullptr;
 }
 
 inline void MPPI_GPU::setSeed(std::uint_fast64_t seed) {
+  if (!curand_gen) {
+    CURAND_CHECK(curandCreateGenerator(&curand_gen, CURAND_RNG_PSEUDO_PHILOX4_32_10));
+  }
   CURAND_CHECK(curandSetPseudoRandomGeneratorSeed(
       curand_gen, static_cast<unsigned long long>(seed)));
 }

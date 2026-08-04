@@ -443,6 +443,24 @@ def write_final_stats(benchmark_dir, all_solver_rows):
         "mean_executed_steps",
         "mean_total_solver_elapsed_s",
         "std_total_solver_elapsed_s",
+        "mean_total_rollout_elapsed_s",
+        "std_total_rollout_elapsed_s",
+        "mean_total_clustering_elapsed_s",
+        "std_total_clustering_elapsed_s",
+        "mean_total_connection_elapsed_s",
+        "std_total_connection_elapsed_s",
+        "mean_total_guide_elapsed_s",
+        "std_total_guide_elapsed_s",
+        "mean_solver_elapsed_per_iter_s",
+        "std_solver_elapsed_per_iter_s",
+        "mean_rollout_elapsed_per_iter_s",
+        "std_rollout_elapsed_per_iter_s",
+        "mean_clustering_elapsed_per_iter_s",
+        "std_clustering_elapsed_per_iter_s",
+        "mean_connection_elapsed_per_iter_s",
+        "std_connection_elapsed_per_iter_s",
+        "mean_guide_elapsed_per_iter_s",
+        "std_guide_elapsed_per_iter_s",
         "mean_wall_elapsed_s",
         "std_wall_elapsed_s",
         "mean_final_q_error",
@@ -451,6 +469,15 @@ def write_final_stats(benchmark_dir, all_solver_rows):
         "mean_collision_count",
         "max_collision_count",
         "all_mean_total_solver_elapsed_s",
+        "all_mean_total_rollout_elapsed_s",
+        "all_mean_total_clustering_elapsed_s",
+        "all_mean_total_connection_elapsed_s",
+        "all_mean_total_guide_elapsed_s",
+        "all_mean_solver_elapsed_per_iter_s",
+        "all_mean_rollout_elapsed_per_iter_s",
+        "all_mean_clustering_elapsed_per_iter_s",
+        "all_mean_connection_elapsed_per_iter_s",
+        "all_mean_guide_elapsed_per_iter_s",
         "all_mean_wall_elapsed_s",
         "all_mean_final_q_error",
         "all_mean_final_ee_error",
@@ -494,6 +521,37 @@ def write_final_stats(benchmark_dir, all_solver_rows):
             solver_elapsed = [
                 as_float(row, "total_solver_elapsed_s") for row in successful_rows
             ]
+            rollout_elapsed = [
+                as_float(row, "total_rollout_elapsed_s") for row in successful_rows
+            ]
+            clustering_elapsed = [
+                as_float(row, "total_clustering_elapsed_s")
+                for row in successful_rows
+            ]
+            connection_elapsed = [
+                as_float(row, "total_connection_elapsed_s")
+                for row in successful_rows
+            ]
+            guide_elapsed = [
+                as_float(row, "total_guide_elapsed_s") for row in successful_rows
+            ]
+            solver_elapsed_per_iter = [
+                as_float(row, "mean_solver_elapsed_s") for row in successful_rows
+            ]
+            rollout_elapsed_per_iter = [
+                as_float(row, "mean_rollout_elapsed_s") for row in successful_rows
+            ]
+            clustering_elapsed_per_iter = [
+                as_float(row, "mean_clustering_elapsed_s")
+                for row in successful_rows
+            ]
+            connection_elapsed_per_iter = [
+                as_float(row, "mean_connection_elapsed_s")
+                for row in successful_rows
+            ]
+            guide_elapsed_per_iter = [
+                as_float(row, "mean_guide_elapsed_s") for row in successful_rows
+            ]
             wall_elapsed = [
                 as_float(row, "wall_elapsed_s") for row in successful_rows
             ]
@@ -505,6 +563,33 @@ def write_final_stats(benchmark_dir, all_solver_rows):
             collisions = [as_float(row, "collision_count") for row in successful_rows]
             all_solver_elapsed = [
                 as_float(row, "total_solver_elapsed_s") for row in rows
+            ]
+            all_rollout_elapsed = [
+                as_float(row, "total_rollout_elapsed_s") for row in rows
+            ]
+            all_clustering_elapsed = [
+                as_float(row, "total_clustering_elapsed_s") for row in rows
+            ]
+            all_connection_elapsed = [
+                as_float(row, "total_connection_elapsed_s") for row in rows
+            ]
+            all_guide_elapsed = [
+                as_float(row, "total_guide_elapsed_s") for row in rows
+            ]
+            all_solver_elapsed_per_iter = [
+                as_float(row, "mean_solver_elapsed_s") for row in rows
+            ]
+            all_rollout_elapsed_per_iter = [
+                as_float(row, "mean_rollout_elapsed_s") for row in rows
+            ]
+            all_clustering_elapsed_per_iter = [
+                as_float(row, "mean_clustering_elapsed_s") for row in rows
+            ]
+            all_connection_elapsed_per_iter = [
+                as_float(row, "mean_connection_elapsed_s") for row in rows
+            ]
+            all_guide_elapsed_per_iter = [
+                as_float(row, "mean_guide_elapsed_s") for row in rows
             ]
             all_wall_elapsed = [as_float(row, "wall_elapsed_s") for row in rows]
             all_q_error = [as_float(row, "final_q_error") for row in rows]
@@ -558,6 +643,52 @@ def write_final_stats(benchmark_dir, all_solver_rows):
                     "mean_executed_steps": csv_mean(executed_steps),
                     "mean_total_solver_elapsed_s": csv_mean(solver_elapsed),
                     "std_total_solver_elapsed_s": csv_stddev(solver_elapsed),
+                    "mean_total_rollout_elapsed_s": csv_mean(rollout_elapsed),
+                    "std_total_rollout_elapsed_s": csv_stddev(rollout_elapsed),
+                    "mean_total_clustering_elapsed_s": csv_mean(
+                        clustering_elapsed
+                    ),
+                    "std_total_clustering_elapsed_s": csv_stddev(
+                        clustering_elapsed
+                    ),
+                    "mean_total_connection_elapsed_s": csv_mean(
+                        connection_elapsed
+                    ),
+                    "std_total_connection_elapsed_s": csv_stddev(
+                        connection_elapsed
+                    ),
+                    "mean_total_guide_elapsed_s": csv_mean(guide_elapsed),
+                    "std_total_guide_elapsed_s": csv_stddev(guide_elapsed),
+                    "mean_solver_elapsed_per_iter_s": csv_mean(
+                        solver_elapsed_per_iter
+                    ),
+                    "std_solver_elapsed_per_iter_s": csv_stddev(
+                        solver_elapsed_per_iter
+                    ),
+                    "mean_rollout_elapsed_per_iter_s": csv_mean(
+                        rollout_elapsed_per_iter
+                    ),
+                    "std_rollout_elapsed_per_iter_s": csv_stddev(
+                        rollout_elapsed_per_iter
+                    ),
+                    "mean_clustering_elapsed_per_iter_s": csv_mean(
+                        clustering_elapsed_per_iter
+                    ),
+                    "std_clustering_elapsed_per_iter_s": csv_stddev(
+                        clustering_elapsed_per_iter
+                    ),
+                    "mean_connection_elapsed_per_iter_s": csv_mean(
+                        connection_elapsed_per_iter
+                    ),
+                    "std_connection_elapsed_per_iter_s": csv_stddev(
+                        connection_elapsed_per_iter
+                    ),
+                    "mean_guide_elapsed_per_iter_s": csv_mean(
+                        guide_elapsed_per_iter
+                    ),
+                    "std_guide_elapsed_per_iter_s": csv_stddev(
+                        guide_elapsed_per_iter
+                    ),
                     "mean_wall_elapsed_s": csv_mean(wall_elapsed),
                     "std_wall_elapsed_s": csv_stddev(wall_elapsed),
                     "mean_final_q_error": csv_mean(q_error),
@@ -566,6 +697,31 @@ def write_final_stats(benchmark_dir, all_solver_rows):
                     "mean_collision_count": csv_mean(collisions),
                     "max_collision_count": csv_max(collisions),
                     "all_mean_total_solver_elapsed_s": mean(all_solver_elapsed),
+                    "all_mean_total_rollout_elapsed_s": mean(
+                        all_rollout_elapsed
+                    ),
+                    "all_mean_total_clustering_elapsed_s": mean(
+                        all_clustering_elapsed
+                    ),
+                    "all_mean_total_connection_elapsed_s": mean(
+                        all_connection_elapsed
+                    ),
+                    "all_mean_total_guide_elapsed_s": mean(all_guide_elapsed),
+                    "all_mean_solver_elapsed_per_iter_s": mean(
+                        all_solver_elapsed_per_iter
+                    ),
+                    "all_mean_rollout_elapsed_per_iter_s": mean(
+                        all_rollout_elapsed_per_iter
+                    ),
+                    "all_mean_clustering_elapsed_per_iter_s": mean(
+                        all_clustering_elapsed_per_iter
+                    ),
+                    "all_mean_connection_elapsed_per_iter_s": mean(
+                        all_connection_elapsed_per_iter
+                    ),
+                    "all_mean_guide_elapsed_per_iter_s": mean(
+                        all_guide_elapsed_per_iter
+                    ),
                     "all_mean_wall_elapsed_s": mean(all_wall_elapsed),
                     "all_mean_final_q_error": mean(all_q_error),
                     "all_mean_final_ee_error": mean(all_ee_error),

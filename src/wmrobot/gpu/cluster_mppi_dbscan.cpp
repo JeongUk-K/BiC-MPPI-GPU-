@@ -30,14 +30,6 @@ int main(int argc, char **argv) {
   Eigen::VectorXd sigma_u(model.dim_u);
   sigma_u << 0.6, 0.6;
   param.sigma_u = sigma_u.asDiagonal();
-  // [fastsc GPU K-means]
-  param.clustering_method = ClusteringMethod::KMeans;
-  param.kmeans_clusters = 5;
-  param.kmeans_max_iterations = 100;
-  param.kmeans_threshold = 1e-6;
-
-  bool has_seed = false;
-  std::uint_fast64_t seed = 0;
 
   int map_begin = 299;
   int num_maps = 300;
@@ -45,6 +37,8 @@ int main(int argc, char **argv) {
   int maxiter = 200;
   int vis_every = 1;
   bool save_rollouts = true;
+  bool has_seed = false;
+  std::uint_fast64_t seed = 0;
   std::string dataset_dir = "../BARN_dataset/txt_files";
 
   for (int i = 1; i < argc; ++i) {
@@ -76,16 +70,18 @@ int main(int argc, char **argv) {
       param.T = std::stoi(require_value(key));
     } else if (key == "--N") {
       param.N = std::stoi(require_value(key));
+    } else if (key == "--seed") {
+      seed = static_cast<std::uint_fast64_t>(
+          std::stoull(require_value(key)));
+      has_seed = true;
+    } else if (key == "--clustering") {
+      param.clustering_method = parseClusteringMethod(require_value(key));
     } else if (key == "--kmeans-clusters") {
       param.kmeans_clusters = std::stoi(require_value(key));
     } else if (key == "--kmeans-iters") {
       param.kmeans_max_iterations = std::stoi(require_value(key));
     } else if (key == "--kmeans-threshold") {
       param.kmeans_threshold = std::stod(require_value(key));
-    } else if (key == "--seed") {
-      seed = static_cast<std::uint_fast64_t>(
-          std::stoull(require_value(key)));
-      has_seed = true;
     } else if (key == "--dataset-dir") {
       dataset_dir = require_value(key);
     } else if (key == "--vis-every") {
@@ -94,7 +90,7 @@ int main(int argc, char **argv) {
       save_rollouts = false;
     } else if (key == "--help" || key == "-h") {
       std::cout
-          << "Usage: wmrobot_cluster_mppi_kmeans [options]\n"
+          << "Usage: wmrobot_cluster_mppi [options]\n"
           << "  --smoke              Run one tiny validation case\n"
           << "  --map-begin N        First BARN map id. Default: 299\n"
           << "  --num-maps N         Number of maps descending from map-begin. Default: 300\n"
@@ -102,10 +98,11 @@ int main(int argc, char **argv) {
           << "  --maxiter N          Max closed-loop iterations. Default: 200\n"
           << "  --T N                Horizon. Default: 100\n"
           << "  --N N                Rollout count. Default: 10000\n"
-          << "  --kmeans-clusters N  Number of K-means clusters. Default: 5\n"
-          << "  --kmeans-iters N     Maximum K-means iterations. Default: 100\n"
-          << "  --kmeans-threshold X Relative convergence threshold. Default: 1e-6\n"
           << "  --seed N             Fixed CUDA random seed\n"
+          << "  --clustering NAME    dbscan or kmeans. Default: dbscan\n"
+          << "  --kmeans-clusters N  K-means cluster count. Default: 5\n"
+          << "  --kmeans-iters N     K-means max iterations. Default: 100\n"
+          << "  --kmeans-threshold X K-means convergence threshold. Default: 1e-6\n"
           << "  --dataset-dir DIR    BARN txt file directory\n"
           << "  --vis-every N        Save rollout data every N iterations. Default: 1\n"
           << "  --no-rollouts        Save CSV files only\n";
@@ -117,17 +114,16 @@ int main(int argc, char **argv) {
 
   if (param.kmeans_clusters <= 0 || param.kmeans_max_iterations <= 0 ||
       param.kmeans_threshold < 0.0)
-    throw std::runtime_error(
-        "K-means parameters must be positive (threshold may be zero)");
+    throw std::runtime_error("K-means parameters must be positive (threshold may be zero)");
 
-  const std::string variant = "Cluster-MPPI-KMeans";
+  const std::string variant = "Cluster-MPPI";
   std::vector<WmrobotGpuRunResult> runs;
 
-  std::ofstream csv(wmrobotGpuResultPath("result_cluster_mppi_kmeans.csv"));
+  std::ofstream csv(wmrobotGpuResultPath("result_cluster_mppi.csv"));
   writeWmrobotGpuRunHeader(csv);
   csv.flush();
 
-  std::ofstream progress_csv(wmrobotGpuResultPath("result_cluster_mppi_kmeans_progress.csv"));
+  std::ofstream progress_csv(wmrobotGpuResultPath("result_cluster_mppi_progress.csv"));
   writeWmrobotGpuRunHeader(progress_csv);
   progress_csv.flush();
   // for (int map = 299; map >= 0 ; --map) {
@@ -160,8 +156,7 @@ int main(int argc, char **argv) {
       solver.setCollisionChecker(&collision_checker);
 
       MPPIVisLogger vis_logger;
-      initWmrobotGpuVisLogger(vis_logger, save_rollouts,
-                              "cluster_mppi_kmeans", s,
+      initWmrobotGpuVisLogger(vis_logger, save_rollouts, "cluster_mppi", s,
                               map, model.dim_x, param.T, collision_checker,
                               param.x_init, param.x_target);
       solver.setVisLogger(&vis_logger);
@@ -220,7 +215,7 @@ int main(int argc, char **argv) {
   progress_csv.close();
 
   const auto summary = summarizeWmrobotGpuRuns(variant, runs);
-  std::ofstream summary_csv(wmrobotGpuResultPath("result_cluster_mppi_kmeans_summary.csv"));
+  std::ofstream summary_csv(wmrobotGpuResultPath("result_cluster_mppi_summary.csv"));
   writeWmrobotGpuSummaryHeader(summary_csv);
   writeWmrobotGpuSummaryRow(summary_csv, summary);
   return 0;

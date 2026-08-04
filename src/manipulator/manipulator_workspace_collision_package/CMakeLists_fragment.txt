@@ -8,6 +8,8 @@
 
 set(MANIPULATOR_WORKSPACE_INCLUDE
     ${CMAKE_CURRENT_SOURCE_DIR}/src/manipulator/manipulator_workspace_collision_package/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/mppi/cuda-accel
+    ${CMAKE_CURRENT_SOURCE_DIR}/include/fastsc
 )
 set(MANIPULATOR_WORKSPACE_SRC_DIR
     ${CMAKE_CURRENT_SOURCE_DIR}/src/manipulator/manipulator_workspace_collision_package/src
@@ -35,6 +37,7 @@ add_executable(manipulator_clustermppi_workspace_example
 
 add_executable(manipulator_bicmppi_workspace_example
     ${MANIPULATOR_WORKSPACE_EXAMPLE_DIR}/manipulator_bicmppi_workspace_example.cpp
+    ${MANIPULATOR_WORKSPACE_SRC_DIR}/bi_mppi_gpu_legacy.cu
     ${MANIPULATOR_WORKSPACE_SRC_DIR}/bi_mppi_gpu.cu
 )
 
@@ -57,6 +60,7 @@ add_executable(manipulator_clustermppi_pinkNplace_workspace_example
 
 add_executable(manipulator_bicmppi_pinkNplace_workspace_example
     ${MANIPULATOR_WORKSPACE_EXAMPLE_DIR}/pinkNplace/manipulator_bicmppi_pinkNplace_workspace_example.cpp
+    ${MANIPULATOR_WORKSPACE_SRC_DIR}/bi_mppi_gpu_legacy.cu
     ${MANIPULATOR_WORKSPACE_SRC_DIR}/bi_mppi_gpu.cu
 )
 

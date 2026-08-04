@@ -26,14 +26,15 @@ struct BiMppiConfig {
   int num_maps = 300;
   int start_cases = 2;
   int vis_every = 1;
+  bool has_seed = false;
+  std::uint_fast64_t seed = 0;
+  ClusteringMethod clustering_method = ClusteringMethod::DBSCAN;
   int kmeans_clusters = 5;
   int kmeans_max_iterations = 100;
   double kmeans_threshold = 1e-6;
   std::string connection_metric = "se2";
   double se2_weight_xy = 1.0;
   double se2_weight_theta = 1.0;
-  bool has_seed = false;
-  std::uint_fast64_t seed = 0;
   bool save_rollouts = true;
   std::string dataset_dir = "../BARN_dataset/txt_files";
 };
@@ -43,28 +44,32 @@ bool looksLikeOption(const std::string &value) {
 }
 
 void printUsage(const char *argv0) {
-  std::cerr << "Usage: " << argv0 << " [options]\n"
-            << "Options:\n"
-            << "  --smoke              Run one tiny validation case\n"
-            << "  --map-begin N        First BARN map id. Default: 299\n"
-            << "  --num-maps N         Number of maps descending from map-begin. Default: 300\n"
-            << "  --start-cases N      Number of start cases. Default: 2\n"
-            << "  --maxiter N          Max closed-loop iterations. Default: 200\n"
-            << "  --Tf N               Forward horizon. Default: 50\n"
-            << "  --Tb N               Backward horizon. Default: 50\n"
-            << "  --Nf N               Forward rollout count. Default: 10000\n"
-            << "  --Nb N               Backward rollout count. Default: 10000\n"
-            << "  --Nr N               Guide rollout count. Default: 5000\n"
-            << "  --kmeans-clusters N  Number of K-means clusters. Default: 5\n"
-            << "  --kmeans-iters N     Maximum K-means iterations. Default: 100\n"
-            << "  --kmeans-threshold X Relative convergence threshold. Default: 1e-6\n"
-            << "  --connection-metric NAME  euclidean or se2. Default: se2\n"
-            << "  --se2-weight-xy W    SE(2) position weight. Default: 0.2\n"
-            << "  --se2-weight-theta W SE(2) heading weight. Default: 1.0\n"
-            << "  --seed N             Fixed CUDA random seed\n"
-            << "  --dataset-dir DIR    BARN txt file directory\n"
-            << "  --vis-every N        Save rollout data every N iterations. Default: 1\n"
-            << "  --no-rollouts        Save CSV files only\n";
+  std::cerr
+      << "Usage: " << argv0 << " [options]\n"
+      << "Options:\n"
+      << "  --smoke              Run one tiny validation case\n"
+      << "  --map-begin N        First BARN map id. Default: 299\n"
+      << "  --num-maps N         Number of maps descending from map-begin. "
+         "Default: 300\n"
+      << "  --start-cases N      Number of start cases. Default: 2\n"
+      << "  --maxiter N          Max closed-loop iterations. Default: 200\n"
+      << "  --Tf N               Forward horizon. Default: 50\n"
+      << "  --Tb N               Backward horizon. Default: 50\n"
+      << "  --Nf N               Forward rollout count. Default: 10000\n"
+      << "  --Nb N               Backward rollout count. Default: 10000\n"
+      << "  --Nr N               Guide rollout count. Default: 5000\n"
+      << "  --seed N             Fixed CUDA random seed\n"
+      << "  --clustering NAME    dbscan or kmeans. Default: dbscan\n"
+      << "  --kmeans-clusters N  K-means cluster count. Default: 5\n"
+      << "  --kmeans-iters N     K-means max iterations. Default: 100\n"
+      << "  --kmeans-threshold X K-means convergence threshold. Default: 1e-6\n"
+      << "  --connection-metric NAME  euclidean or se2. Default: se2\n"
+      << "  --se2-weight-xy W    SE(2) position weight. Default: 0.2\n"
+      << "  --se2-weight-theta W SE(2) heading weight. Default: 1.0\n"
+      << "  --dataset-dir DIR    BARN txt file directory\n"
+      << "  --vis-every N        Save rollout data every N iterations. "
+         "Default: 1\n"
+      << "  --no-rollouts        Save CSV files only\n";
 }
 
 BiMppiConfig parseArgs(int argc, char **argv) {
@@ -109,6 +114,12 @@ BiMppiConfig parseArgs(int argc, char **argv) {
       config.Nb = std::stoi(require_value(key));
     } else if (key == "--Nr") {
       config.Nr = std::stoi(require_value(key));
+    } else if (key == "--seed") {
+      config.seed =
+          static_cast<std::uint_fast64_t>(std::stoull(require_value(key)));
+      config.has_seed = true;
+    } else if (key == "--clustering") {
+      config.clustering_method = parseClusteringMethod(require_value(key));
     } else if (key == "--kmeans-clusters") {
       config.kmeans_clusters = std::stoi(require_value(key));
     } else if (key == "--kmeans-iters") {
@@ -126,10 +137,6 @@ BiMppiConfig parseArgs(int argc, char **argv) {
       config.se2_weight_xy = std::stod(require_value(key));
     } else if (key == "--se2-weight-theta") {
       config.se2_weight_theta = std::stod(require_value(key));
-    } else if (key == "--seed") {
-      config.seed = static_cast<std::uint_fast64_t>(
-          std::stoull(require_value(key)));
-      config.has_seed = true;
     } else if (key == "--dataset-dir") {
       config.dataset_dir = require_value(key);
     } else if (key == "--vis-every") {
@@ -178,27 +185,23 @@ int main(int argc, char **argv) {
   Eigen::VectorXd sigma_u(model.dim_u);
   sigma_u << 0.6, 0.6;
   param.sigma_u = sigma_u.asDiagonal();
-  param.deviation_mu = 1.0; // retained for DBSCAN-compatible configs
+  param.deviation_mu = 1.0;
   param.cost_mu = 1.0;
   param.minpts = 5;
   param.epsilon = 0.01;
-  // [fastsc GPU K-means]
-  param.clustering_method = ClusteringMethod::KMeans;
+  param.psi = 0.6;
+  param.clustering_method = config.clustering_method;
   param.kmeans_clusters = config.kmeans_clusters;
   param.kmeans_max_iterations = config.kmeans_max_iterations;
   param.kmeans_threshold = config.kmeans_threshold;
-  param.psi = 0.6;
 
   int maxiter = config.maxiter;
 
   const bool use_se2 = config.connection_metric == "se2";
-  const std::string variant =
-      use_se2 ? "BiC-MPPI-KMeans-SE2" : "BiC-MPPI-KMeans";
-  const std::string output_prefix = use_se2
-                                        ? "result_bi_mppi_kmeans_se2"
-                                        : "result_bi_mppi_kmeans";
-  const std::string vis_prefix =
-      use_se2 ? "bi_mppi_kmeans_se2" : "bi_mppi_kmeans";
+  const std::string variant = use_se2 ? "BiC-MPPI-SE2" : "BiC-MPPI";
+  const std::string output_prefix =
+      use_se2 ? "result_bi_mppi_se2" : "result_bi_mppi";
+  const std::string vis_prefix = use_se2 ? "bi_mppi_se2" : "bi_mppi";
   std::vector<WmrobotGpuRunResult> runs;
 
   std::ofstream csv(wmrobotGpuResultPath(output_prefix + ".csv"));
@@ -228,12 +231,12 @@ int main(int argc, char **argv) {
     for (int map = config.map_begin;
          map >= 0 && map > config.map_begin - config.num_maps; --map) {
       CollisionChecker collision_checker = CollisionChecker();
-      collision_checker.loadMap(config.dataset_dir + "/output_" +
-                                    std::to_string(map) + ".txt",
-                                0.1);
+      collision_checker.loadMap(
+          config.dataset_dir + "/output_" + std::to_string(map) + ".txt", 0.1);
 
       Solver solver(model);
-      if (config.has_seed) solver.setSeed(config.seed);
+      if (config.has_seed)
+        solver.setSeed(config.seed);
       solver.U_f0 = Eigen::MatrixXd::Zero(model.dim_u, param.Tf);
       solver.U_b0 = Eigen::MatrixXd::Zero(model.dim_u, param.Tb);
       solver.init(param);
@@ -245,10 +248,9 @@ int main(int argc, char **argv) {
       solver.setCollisionChecker(&collision_checker);
 
       MPPIVisLogger vis_logger;
-      initWmrobotGpuVisLogger(vis_logger, config.save_rollouts,
-                              vis_prefix, s, map, model.dim_x,
-                              param.Tf + param.Tb, collision_checker,
-                              param.x_init, param.x_target);
+      initWmrobotGpuVisLogger(vis_logger, config.save_rollouts, vis_prefix, s,
+                              map, model.dim_x, param.Tf + param.Tb,
+                              collision_checker, param.x_init, param.x_target);
       solver.setVisLogger(&vis_logger);
 
       WmrobotGpuRunResult row;

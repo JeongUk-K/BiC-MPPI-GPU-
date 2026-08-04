@@ -47,13 +47,48 @@ ClusterMPPI_GPU::~ClusterMPPI_GPU() {}
 
 void ClusterMPPI_GPU::init(MPPIParam param) {
   MPPI_GPU::init(param);
+  clustering_method = param.clustering_method;
   kmeans_clusters = param.kmeans_clusters;
   kmeans_max_iterations = param.kmeans_max_iterations;
   kmeans_threshold = param.kmeans_threshold;
 }
 
-// ---- fastsc K-means (GPU, same features as the former DBSCAN) ----
-void ClusterMPPI_GPU::kmeansCluster(std::vector<std::vector<int>> &clusters,
+// ---- fastsc K-means (GPU, using the same features as DBSCAN) ----
+void ClusterMPPI_GPU::kmeansCluster(
+    std::vector<std::vector<int>> &clusters,
+    const Eigen::MatrixXd &feature_source, const Eigen::VectorXd &costs,
+    int N_samples, int T_steps) {
+  constexpr int kNumBlocks = 3;
+  Eigen::MatrixXd block_feature;
+  const Eigen::MatrixXd *feature_ptr = &feature_source;
+
+  const bool source_is_control_sequence =
+      feature_source.rows() == N_samples * dim_u &&
+      feature_source.cols() == T_steps && T_steps > 0;
+  if (source_is_control_sequence) {
+    block_feature = Eigen::MatrixXd::Zero(kNumBlocks * dim_u, N_samples);
+    for (int i = 0; i < N_samples; ++i) {
+      for (int block = 0; block < kNumBlocks; ++block) {
+        const int t0 = (block * T_steps) / kNumBlocks;
+        const int t1 = ((block + 1) * T_steps) / kNumBlocks;
+        const int length = std::max(1, t1 - t0);
+        for (int d = 0; d < dim_u; ++d) {
+          double sum = 0.0;
+          for (int t = t0; t < t1; ++t)
+            sum += feature_source(i * dim_u + d, t);
+          block_feature(block * dim_u + d, i) = sum / length;
+        }
+      }
+    }
+    feature_ptr = &block_feature;
+  }
+
+  runGPUKMeans(clusters, *feature_ptr, costs,
+               {kmeans_clusters, kmeans_max_iterations, kmeans_threshold});
+}
+
+// ---- DBSCAN (CPU, aligned with BiMPPI_GPU) ----
+void ClusterMPPI_GPU::dbscan(std::vector<std::vector<int>> &clusters,
                               const Eigen::MatrixXd &feature_source,
                               const Eigen::VectorXd &costs,
                               int N_samples, int T_steps) {
@@ -101,12 +136,6 @@ void ClusterMPPI_GPU::kmeansCluster(std::vector<std::vector<int>> &clusters,
   }
 
   const Eigen::MatrixXd &feature = *feature_ptr;
-
-  runGPUKMeans(clusters, feature, costs,
-               {kmeans_clusters, kmeans_max_iterations, kmeans_threshold});
-  return;
-
-#if 0 // Former CPU DBSCAN retained temporarily for algorithm comparison.
 
   std::vector<std::vector<int>> upper_neighbors(N_samples);
   std::vector<char> valid(N_samples, false);
@@ -196,7 +225,6 @@ void ClusterMPPI_GPU::kmeansCluster(std::vector<std::vector<int>> &clusters,
   if (clusters.empty()) {
     clusters.push_back(std::move(valid_indices));
   }
-#endif
 }
 
 void ClusterMPPI_GPU::calculateU(Eigen::MatrixXd &Uout,
@@ -257,8 +285,8 @@ void ClusterMPPI_GPU::solve() {
   auto t_cluster_start = std::chrono::high_resolution_clock::now();
   elapsed_rollout = std::chrono::duration<double>(t_cluster_start - start).count();
 
-  // Copy costs + Ui to host for clustering.  DBSCAN builds the same 3-block
-  // feature representation as BiMPPI_GPU from the sampled control sequences.
+  // Copy costs + Ui to host. Both backends build the same 3-block feature
+  // representation from the sampled control sequences.
   std::vector<double> h_costs(N);
   CUDA_CHECK(cudaMemcpy(h_costs.data(), d_costs, N * sizeof(double), cudaMemcpyDeviceToHost));
 
@@ -274,9 +302,12 @@ void ClusterMPPI_GPU::solve() {
 
   Eigen::VectorXd costs_cpu = Eigen::Map<Eigen::VectorXd>(h_costs.data(), N);
 
-  // --- fastsc K-means clustering (GPU) ---
+  // --- Selected clustering backend ---
   std::vector<std::vector<int>> clusters;
-  kmeansCluster(clusters, Ui_cpu, costs_cpu, N, T);
+  if (clustering_method == ClusteringMethod::KMeans)
+    kmeansCluster(clusters, Ui_cpu, costs_cpu, N, T);
+  else
+    dbscan(clusters, Ui_cpu, costs_cpu, N, T);
   if (clusters.empty()) clusters.push_back(full_cluster);
   calculateU(U, clusters, costs_cpu, Ui_cpu, T);
 
@@ -317,6 +348,7 @@ void ClusterMPPI_GPU::solve() {
   for (int j = 0; j < T; ++j) {
     Xo.col(j + 1) = Xo.col(j) + (double)dt * f(Xo.col(j), Uo.col(j));
   }
+  cost = evaluateTrajectoryCost(Xo);
 
   // ── Visualization data export ──
   if (vis_logger && vis_logger->enabled) {
@@ -340,6 +372,7 @@ void ClusterMPPI_GPU::solve() {
     }
     vis_logger->saveTrajectories("clusters", cluster_trajs);
     vis_logger->saveTrajectory("optimal", Xo);
+    vis_logger->saveOptimalCost(cost);
     vis_logger->savePosition(x_init);
   }
 

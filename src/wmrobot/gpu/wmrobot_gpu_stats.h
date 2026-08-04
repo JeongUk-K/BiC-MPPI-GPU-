@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
+#include <cstdlib>
 #include <iomanip>
 #include <ios>
 #include <limits>
@@ -18,6 +19,7 @@ struct WmrobotGpuRunResult {
   bool is_success = false;
   bool is_collision = false;
   int iter = 0;
+  double cost = std::numeric_limits<double>::quiet_NaN();
   double elapsed = 0.0;
   double elapsed_rollout = 0.0;
   double elapsed_clustering = 0.0;
@@ -35,6 +37,7 @@ struct WmrobotGpuSummary {
   double success_rate = 0.0;
   double nbar_iter = 0.0;
   double tbar_elapsed = 0.0;
+  double avg_cost = std::numeric_limits<double>::quiet_NaN();
   double dbar_goal = 0.0;
   double dbar_conn = std::numeric_limits<double>::quiet_NaN();
   double avg_iter_success = std::numeric_limits<double>::quiet_NaN();
@@ -69,6 +72,14 @@ inline std::string wmrobotGpuCsvDouble(double value) {
   return out.str();
 }
 
+inline std::string wmrobotGpuResultPath(const std::string &filename) {
+  const char *result_dir = std::getenv("WMROBOT_RESULT_DIR");
+  if (!result_dir || !*result_dir) {
+    return filename;
+  }
+  return std::string(result_dir) + "/" + filename;
+}
+
 inline double wmrobotGpuQuantile(std::vector<double> values, double q) {
   if (values.empty()) {
     return std::numeric_limits<double>::quiet_NaN();
@@ -85,7 +96,7 @@ inline double wmrobotGpuQuantile(std::vector<double> values, double q) {
 }
 
 inline void writeWmrobotGpuRunHeader(std::ostream &csv) {
-  csv << "variant,start_case,map,is_success,is_collision,iter,elapsed,"
+  csv << "variant,start_case,map,is_success,is_collision,iter,cost,elapsed,"
          "elapsed_rollout,elapsed_clustering,elapsed_connection,elapsed_guide,"
          "d_goal,d_conn\n";
 }
@@ -94,6 +105,7 @@ inline void writeWmrobotGpuRunRow(std::ostream &csv,
                                   const WmrobotGpuRunResult &row) {
   csv << row.variant << ',' << row.start_case << ',' << row.map_id << ','
       << row.is_success << ',' << row.is_collision << ',' << row.iter << ','
+      << wmrobotGpuCsvDouble(row.cost) << ','
       << wmrobotGpuCsvDouble(row.elapsed) << ','
       << wmrobotGpuCsvDouble(row.elapsed_rollout) << ','
       << wmrobotGpuCsvDouble(row.elapsed_clustering) << ','
@@ -106,13 +118,14 @@ inline void writeWmrobotGpuRunRow(std::ostream &csv,
 inline void printWmrobotGpuRunRow(std::ostream &out,
                                   const WmrobotGpuRunResult &row) {
   out << row.variant << '\t' << row.start_case << '\t' << row.map_id << '\t'
-      << row.is_success << '\t' << row.iter << '\t' << row.elapsed << '\t'
+      << row.is_success << '\t' << row.iter << '\t' << row.cost << '\t'
+      << row.elapsed << '\t'
       << row.d_goal << '\t' << wmrobotGpuCsvDouble(row.d_conn) << std::endl;
 }
 
 inline void writeWmrobotGpuSummaryHeader(std::ostream &csv) {
   csv << "Variant,Success Rate,Nfail,Nbar_iter,Tbar_elapsed,dbar_goal,"
-         "dbar_conn,num_runs,num_success,"
+         "dbar_conn,avg_cost,num_runs,num_success,"
          "variant,num_sim,num_success,num_failure,success_rate,"
          "avg_iter_success,avg_total_elapsed_success,"
          "avg_rollout_time_success,avg_clustering_time_success,"
@@ -133,7 +146,8 @@ inline void writeWmrobotGpuSummaryRow(std::ostream &csv,
       << ',' << summary.nfail << ',' << wmrobotGpuCsvDouble(summary.nbar_iter)
       << ',' << wmrobotGpuCsvDouble(summary.tbar_elapsed) << ','
       << wmrobotGpuCsvDouble(summary.dbar_goal) << ','
-      << wmrobotGpuCsvDouble(summary.dbar_conn) << ',' << summary.num_runs
+      << wmrobotGpuCsvDouble(summary.dbar_conn) << ','
+      << wmrobotGpuCsvDouble(summary.avg_cost) << ',' << summary.num_runs
       << ',' << summary.num_success << ',' << summary.variant << ','
       << summary.num_runs << ',' << summary.num_success << ','
       << summary.nfail << ',' << wmrobotGpuCsvDouble(summary.success_rate)
@@ -175,6 +189,8 @@ summarizeWmrobotGpuRuns(const std::string &variant,
   double goal_sum = 0.0;
   double conn_sum = 0.0;
   int conn_count = 0;
+  double cost_sum = 0.0;
+  int cost_count = 0;
   double success_iter_sum = 0.0;
   double success_elapsed_sum = 0.0;
   double success_rollout_sum = 0.0;
@@ -192,6 +208,10 @@ summarizeWmrobotGpuRuns(const std::string &variant,
     iter_sum += run.iter;
     elapsed_sum += run.elapsed;
     goal_sum += run.d_goal;
+    if (std::isfinite(run.cost)) {
+      cost_sum += run.cost;
+      ++cost_count;
+    }
     if (std::isfinite(run.d_conn)) {
       conn_sum += run.d_conn;
       ++conn_count;
@@ -217,6 +237,9 @@ summarizeWmrobotGpuRuns(const std::string &variant,
   summary.nbar_iter = iter_sum / summary.num_runs;
   summary.tbar_elapsed = elapsed_sum / summary.num_runs;
   summary.dbar_goal = goal_sum / summary.num_runs;
+  if (cost_count > 0) {
+    summary.avg_cost = cost_sum / cost_count;
+  }
   if (conn_count > 0) {
     summary.dbar_conn = conn_sum / conn_count;
   }

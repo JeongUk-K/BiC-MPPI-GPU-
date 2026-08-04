@@ -54,7 +54,10 @@ DEFINE_WEIGHTED_SUM_KERNEL(mppi_weighted_sum_kernel)
 
 MPPI_GPU::~MPPI_GPU() {
   freeGPU();
-  curandDestroyGenerator(curand_gen);
+  if (curand_gen) {
+    curandDestroyGenerator(curand_gen);
+    curand_gen = nullptr;
+  }
 }
 
 void MPPI_GPU::init(MPPIParam param) {
@@ -175,6 +178,11 @@ void MPPI_GPU::uploadState() {
 }
 
 void MPPI_GPU::generateNoise() {
+  if (!curand_gen) {
+    CURAND_CHECK(curandCreateGenerator(&curand_gen, CURAND_RNG_PSEUDO_PHILOX4_32_10));
+    CURAND_CHECK(curandSetPseudoRandomGeneratorSeed(
+        curand_gen, static_cast<unsigned long long>(std::time(nullptr))));
+  }
   size_t count = (size_t)N * dim_u * T;
   // curand requires even count
   if (count % 2 != 0) count++;

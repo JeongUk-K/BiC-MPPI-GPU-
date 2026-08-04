@@ -17,6 +17,10 @@ public:
     minpts = minpts_value;
   }
 
+  void setClusteringMethod(ClusteringMethod method) {
+    clustering_method = method;
+  }
+
   Eigen::MatrixXd U;
   Eigen::MatrixXd X;
 

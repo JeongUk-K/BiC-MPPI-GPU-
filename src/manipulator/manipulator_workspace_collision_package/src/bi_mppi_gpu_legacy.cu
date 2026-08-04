@@ -1,7 +1,9 @@
-#include "bi_mppi_gpu.cuh"
+#include "bi_mppi_gpu_legacy.cuh"
 #include "gpu_control_reduction.cuh"
 #include "gpu_kmeans.cuh"
 #include "mppi_gpu.cuh"   // rollout_kernel 접근을 위해 포함
+#include "rollout_ee_export.cuh"
+#include "rollout_state_export.cuh"
 #include <algorithm>
 #include <cassert>
 #include <cmath>
@@ -30,6 +32,8 @@ __global__ void backward_rollout_kernel(
     int max_row, int max_col, double res,
     const double* d_circles, int n_circ,
     const double* d_rects,   int n_rect,
+    const double* d_ws_boxes, int n_ws_boxes,
+    double ws_link_radius, double ws_safe_margin, double ws_hard_margin,
     int N, int dim_u, int dim_x, int T, double dt, double gamma_u,
     int model_type)
 {
@@ -58,7 +62,9 @@ __global__ void backward_rollout_kernel(
     double cost = 0.0;
     bool hit = false;
     if (legacy_cuda_collision_grid(x, with_map, d_map, max_row, max_col, res,
-                                   d_circles, n_circ, d_rects, n_rect)) {
+                                   d_circles, n_circ, d_rects, n_rect,
+                                   d_ws_boxes, n_ws_boxes, ws_link_radius,
+                                   ws_safe_margin, ws_hard_margin, model_type)) {
         hit = true; cost = 1e8;
     }
 
@@ -69,12 +75,17 @@ __global__ void backward_rollout_kernel(
             if (j == T-1) u_local[_d] = Ui_i[_d*T+j];
             else          u_local[_d] = Ui_i[_d*T+j+1];
         }
+        cost += legacy_cuda_stage_cost(x, u_local, dim_x, dim_u, model_type,
+                                       d_ws_boxes, n_ws_boxes, ws_link_radius,
+                                       ws_safe_margin, ws_hard_margin);
         legacy_cuda_dynamics(x, u_local, xd_, dim_x, dim_u, model_type);
         for (int d = 0; d < dim_x; ++d) xn[d] = x[d] - dt * xd_[d];
         for (int d = 0; d < dim_x; ++d) x[d] = xn[d];
         cost += legacy_cuda_terminal_cost(x, d_x_init, dim_x, model_type);
         if (legacy_cuda_collision_grid(x, with_map, d_map, max_row, max_col, res,
-                                       d_circles, n_circ, d_rects, n_rect)) {
+                                       d_circles, n_circ, d_rects, n_rect,
+                                       d_ws_boxes, n_ws_boxes, ws_link_radius,
+                                       ws_safe_margin, ws_hard_margin, model_type)) {
             hit = true; cost = 1e8;
         }
     }
@@ -98,6 +109,8 @@ __global__ void guide_rollout_kernel(
     int max_row, int max_col, double res,
     const double* d_circles, int n_circ,
     const double* d_rects,   int n_rect,
+    const double* d_ws_boxes, int n_ws_boxes,
+    double ws_link_radius, double ws_safe_margin, double ws_hard_margin,
     int N, int dim_u, int dim_x, int Tr, double dt, double gamma_u,
     int model_type)
 {
@@ -119,7 +132,9 @@ __global__ void guide_rollout_kernel(
     bool hit = false;
     double guide_cost = 0.0;
     if (legacy_cuda_collision_grid(x, with_map, d_map, max_row, max_col, res,
-                                   d_circles, n_circ, d_rects, n_rect)) {
+                                   d_circles, n_circ, d_rects, n_rect,
+                                   d_ws_boxes, n_ws_boxes, ws_link_radius,
+                                   ws_safe_margin, ws_hard_margin, model_type)) {
         hit = true; cost = 1e8;
     }
 
@@ -134,13 +149,18 @@ __global__ void guide_rollout_kernel(
         guide_cost += sqrt(gc);
         double u_local[GPU_MAX_DIM_U];
         for (int _d = 0; _d < dim_u; ++_d) u_local[_d] = Ui_i[_d*Tr+t];
+        cost += legacy_cuda_stage_cost(x, u_local, dim_x, dim_u, model_type,
+                                       d_ws_boxes, n_ws_boxes, ws_link_radius,
+                                       ws_safe_margin, ws_hard_margin);
         legacy_cuda_dynamics(x, u_local, xd_, dim_x, dim_u, model_type);
         for (int d = 0; d < dim_x; ++d) xn[d] = x[d] + dt*xd_[d];
 
         for (int d = 0; d < dim_x; ++d) x[d] = xn[d];
         if (legacy_cuda_collision_grid(x, with_map, d_map, max_row, max_col,
                                        res, d_circles, n_circ, d_rects,
-                                       n_rect)) {
+                                       n_rect, d_ws_boxes, n_ws_boxes,
+                                       ws_link_radius, ws_safe_margin,
+                                       ws_hard_margin, model_type)) {
             hit = true; cost = 1e8;
         }
     }
@@ -151,7 +171,7 @@ __global__ void guide_rollout_kernel(
             gc += diff*diff;
         }
         guide_cost += sqrt(gc);
-        cost = legacy_cuda_terminal_cost(x, d_x_target, dim_x, model_type);
+        cost += legacy_cuda_terminal_cost(x, d_x_target, dim_x, model_type);
         cost += guide_cost;
     }
     d_costs[i] = cost;
@@ -163,37 +183,41 @@ static void safe_cuda_malloc(double** ptr, size_t sz) {
     if (sz > 0) CUDA_CHECK(cudaMalloc(ptr, sz));
 }
 
-// ── BiMPPI_GPU methods ──────────────────────────────────────────
-BiMPPI_GPU::~BiMPPI_GPU() {
+// ── BiMPPI_GPU_Legacy methods ──────────────────────────────────────────
+BiMPPI_GPU_Legacy::~BiMPPI_GPU_Legacy() {
     freeForward(); freeBackward(); freeGuide(); freeCommon();
-    curandDestroyGenerator(curand_gen);
+    if (curand_gen) {
+        curandDestroyGenerator(curand_gen);
+        curand_gen = nullptr;
+    }
 }
 
-void BiMPPI_GPU::freeForward() {
+void BiMPPI_GPU_Legacy::freeForward() {
     safe_cuda_malloc(&d_Uf0, 0); safe_cuda_malloc(&d_Ufi, 0);
     safe_cuda_malloc(&d_noise_f, 0); safe_cuda_malloc(&d_costs_f, 0);
     safe_cuda_malloc(&d_Uf_out, 0); safe_cuda_malloc(&d_Di_f, 0);
 }
-void BiMPPI_GPU::freeBackward() {
+void BiMPPI_GPU_Legacy::freeBackward() {
     safe_cuda_malloc(&d_Ub0, 0); safe_cuda_malloc(&d_Ubi, 0);
     safe_cuda_malloc(&d_noise_b, 0); safe_cuda_malloc(&d_costs_b, 0);
     safe_cuda_malloc(&d_Ub_out, 0); safe_cuda_malloc(&d_Di_b, 0);
 }
-void BiMPPI_GPU::freeGuide() {
+void BiMPPI_GPU_Legacy::freeGuide() {
     safe_cuda_malloc(&d_Xref, 0);
     safe_cuda_malloc(&d_Ur0, 0); safe_cuda_malloc(&d_Uri, 0);
     safe_cuda_malloc(&d_noise_r, 0); safe_cuda_malloc(&d_costs_r, 0);
     safe_cuda_malloc(&d_Ur_out, 0);
     alloc_Tr_guide = 0;
 }
-void BiMPPI_GPU::freeCommon() {
+void BiMPPI_GPU_Legacy::freeCommon() {
     safe_cuda_malloc(&d_x_init, 0); safe_cuda_malloc(&d_x_target, 0);
     safe_cuda_malloc(&d_sigma, 0);
     safe_cuda_malloc(&d_map, 0); safe_cuda_malloc(&d_circles, 0);
+    safe_cuda_malloc(&d_rects, 0); safe_cuda_malloc(&d_ws_boxes, 0);
     safe_cuda_malloc(&d_rects, 0);
 }
 
-void BiMPPI_GPU::allocForward() {
+void BiMPPI_GPU_Legacy::allocForward() {
     safe_cuda_malloc(&d_Uf0,    (size_t)dim_u*Tf*sizeof(double));
     safe_cuda_malloc(&d_Ufi,    (size_t)Nf*dim_u*Tf*sizeof(double));
     safe_cuda_malloc(&d_noise_f,(size_t)Nf*dim_u*Tf*sizeof(double));
@@ -201,7 +225,7 @@ void BiMPPI_GPU::allocForward() {
     safe_cuda_malloc(&d_Uf_out, (size_t)dim_u*Tf*sizeof(double));
     safe_cuda_malloc(&d_Di_f,   (size_t)Nf*dim_u*sizeof(double));
 }
-void BiMPPI_GPU::allocBackward() {
+void BiMPPI_GPU_Legacy::allocBackward() {
     safe_cuda_malloc(&d_Ub0,    (size_t)dim_u*Tb*sizeof(double));
     safe_cuda_malloc(&d_Ubi,    (size_t)Nb*dim_u*Tb*sizeof(double));
     safe_cuda_malloc(&d_noise_b,(size_t)Nb*dim_u*Tb*sizeof(double));
@@ -210,11 +234,11 @@ void BiMPPI_GPU::allocBackward() {
     safe_cuda_malloc(&d_Di_b,   (size_t)Nb*dim_u*sizeof(double));
 }
 
-void BiMPPI_GPU::allocGuide() {
+void BiMPPI_GPU_Legacy::allocGuide() {
     allocGuideFor(Tf + Tb);
 }
 
-void BiMPPI_GPU::allocGuideFor(int Tr) {
+void BiMPPI_GPU_Legacy::allocGuideFor(int Tr) {
     if (Tr <= alloc_Tr_guide && d_Xref && d_Ur0 && d_Uri && d_noise_r &&
         d_costs_r && d_Ur_out) {
         return;
@@ -229,7 +253,7 @@ void BiMPPI_GPU::allocGuideFor(int Tr) {
     alloc_Tr_guide = Tr;
 }
 
-void BiMPPI_GPU::init(BiMPPIParam p) {
+void BiMPPI_GPU_Legacy::init(BiMPPIParam p) {
     dt = p.dt; Tf = p.Tf; Tb = p.Tb;
     Nf = p.Nf; Nb = p.Nb; Nr = p.Nr;
     gamma_u = p.gamma_u;
@@ -259,27 +283,47 @@ void BiMPPI_GPU::init(BiMPPIParam p) {
     alloc_Nf=Nf; alloc_Nb=Nb; alloc_Tf=Tf; alloc_Tb=Tb;
 }
 
-void BiMPPI_GPU::setCollisionChecker(CollisionChecker* cc) {
+void BiMPPI_GPU_Legacy::kmeansCluster(
+    std::vector<std::vector<int>>& clusters,
+    const Eigen::MatrixXd& feature_source, const Eigen::VectorXd& costs,
+    int sample_count) {
+    constexpr int kNumBlocks = 3;
+    Eigen::MatrixXd block_feature;
+    const Eigen::MatrixXd* feature_ptr = &feature_source;
+
+    const bool source_is_control_sequence =
+        feature_source.rows() == sample_count * dim_u &&
+        feature_source.cols() > 0;
+    if (source_is_control_sequence) {
+        const int time_steps = static_cast<int>(feature_source.cols());
+        block_feature = Eigen::MatrixXd::Zero(kNumBlocks * dim_u, sample_count);
+        for (int i = 0; i < sample_count; ++i) {
+            for (int block = 0; block < kNumBlocks; ++block) {
+                const int t0 = (block * time_steps) / kNumBlocks;
+                const int t1 = ((block + 1) * time_steps) / kNumBlocks;
+                const int length = std::max(1, t1 - t0);
+                for (int d = 0; d < dim_u; ++d) {
+                    double sum = 0.0;
+                    for (int t = t0; t < t1; ++t)
+                        sum += feature_source(i * dim_u + d, t);
+                    block_feature(block * dim_u + d, i) = sum / length;
+                }
+            }
+        }
+        feature_ptr = &block_feature;
+    }
+
+    runGPUKMeans(clusters, *feature_ptr, costs,
+                 {kmeans_clusters, kmeans_max_iterations, kmeans_threshold});
+}
+
+void BiMPPI_GPU_Legacy::setCollisionChecker(CollisionChecker* cc) {
     collision_checker = cc;
     uploadCollisionData();
 }
 
-void BiMPPI_GPU::setConnectionMetric(ConnectionMetric metric) {
-    connection_metric = metric;
-}
-
-void BiMPPI_GPU::setSE2ConnectionWeights(double xy_weight,
-                                         double theta_weight) {
-    if (xy_weight < 0.0 || theta_weight < 0.0 ||
-        (xy_weight == 0.0 && theta_weight == 0.0)) {
-        throw std::invalid_argument(
-            "SE(2) connection weights must be non-negative and not both zero.");
-    }
-    se2_connection_xy_weight = xy_weight;
-    se2_connection_theta_weight = theta_weight;
-}
-
-void BiMPPI_GPU::uploadCollisionData() {
+void BiMPPI_GPU_Legacy::uploadCollisionData() {
+    if (!collision_checker) return;
     map_max_row = (int)collision_checker->map.size();
     map_max_col = map_max_row>0?(int)collision_checker->map[0].size():0;
     map_resolution = collision_checker->resolution;
@@ -310,7 +354,21 @@ void BiMPPI_GPU::uploadCollisionData() {
         for (int i=0;i<n_rects;++i) for(int j=0;j<4;++j) buf[i*4+j]=collision_checker->rectangles[i][j];
         CUDA_CHECK(cudaMemcpy(d_rects,buf.data(),sz,cudaMemcpyHostToDevice));
     }
+    n_ws_boxes=(int)collision_checker->workspace_boxes.size();
+    ws_link_radius = collision_checker->link_radius;
+    ws_safe_margin = collision_checker->workspace_safe_margin;
+    ws_hard_margin = collision_checker->workspace_hard_margin;
+    if (n_ws_boxes>0) {
+        size_t sz=(size_t)n_ws_boxes*6*sizeof(double);
+        safe_cuda_malloc(&d_ws_boxes,sz);
+        std::vector<double> buf(n_ws_boxes*6);
+        for (int i=0;i<n_ws_boxes;++i)
+            for(int j=0;j<6;++j)
+                buf[i*6+j]=collision_checker->workspace_boxes[i][j];
+        CUDA_CHECK(cudaMemcpy(d_ws_boxes,buf.data(),sz,cudaMemcpyHostToDevice));
+    }
 }
+
 
 // ── Helper: Eigen → flat row-major ────────────────────────────────
 static std::vector<double> eigen_to_flat(const Eigen::MatrixXd& M, int rows, int cols) {
@@ -325,7 +383,7 @@ static Eigen::MatrixXd flat_Ui_to_eigen(const std::vector<double>& f, int N, int
     return M;
 }
 
-void BiMPPI_GPU::appendVisRolloutSamples(const Eigen::MatrixXd &Ui_cpu,
+void BiMPPI_GPU_Legacy::appendVisRolloutSamples(const Eigen::MatrixXd &Ui_cpu,
                                          int N_samples, int T_steps,
                                          bool backward) {
     if (!vis_logger || !vis_logger->enabled || N_samples <= 0 ||
@@ -369,70 +427,8 @@ void BiMPPI_GPU::appendVisRolloutSamples(const Eigen::MatrixXd &Ui_cpu,
     }
 }
 
-void BiMPPI_GPU::appendDeviceVisRolloutSamples(
-    const double *device_controls, int sample_count, int horizon,
-    bool backward) {
-    if (!vis_logger || !vis_logger->enabled || sample_count <= 0) return;
-    const int copied_samples =
-        std::min(sample_count, vis_rollout_samples_per_call);
-    std::vector<double> flat(
-        static_cast<std::size_t>(copied_samples) * dim_u * horizon);
-    CUDA_CHECK(cudaMemcpy(flat.data(), device_controls,
-                          flat.size() * sizeof(double),
-                          cudaMemcpyDeviceToHost));
-    appendVisRolloutSamples(
-        flat_Ui_to_eigen(flat, copied_samples, dim_u, horizon),
-        copied_samples, horizon, backward);
-}
-
-void BiMPPI_GPU::clusterControlsDevice(
-    const double *device_controls, const double *device_costs,
-    int sample_count, int horizon, Eigen::MatrixXd &clustered_controls,
-    std::vector<std::vector<int>> &clusters) {
-    std::vector<int> active_clusters;
-    std::vector<double> host_controls;
-    runGPUKMeansControlsDevice(
-        device_controls, device_costs, sample_count, dim_u, horizon, gamma_u,
-        {kmeans_clusters, kmeans_max_iterations, kmeans_threshold},
-        active_clusters, host_controls);
-
-    const int active_count = static_cast<int>(active_clusters.size());
-    clusters.assign(active_count, {});
-    clustered_controls =
-        Eigen::MatrixXd::Zero(active_count * dim_u, horizon);
-    const int control_size = dim_u * horizon;
-    for (int cluster = 0; cluster < active_count; ++cluster) {
-        clusters[cluster].push_back(active_clusters[cluster]);
-        const double *source =
-            host_controls.data() +
-            static_cast<std::size_t>(cluster) * control_size;
-        for (int d = 0; d < dim_u; ++d)
-            for (int t = 0; t < horizon; ++t)
-                clustered_controls(cluster * dim_u + d, t) =
-                    source[d * horizon + t];
-        Eigen::Ref<Eigen::MatrixXd> control =
-            clustered_controls.middleRows(cluster * dim_u, dim_u);
-        h(control);
-    }
-}
-
-Eigen::MatrixXd BiMPPI_GPU::reduceControlsDevice(
-    const double *device_controls, const double *device_costs,
-    int sample_count, int horizon) {
-    std::vector<double> host_control;
-    cuda_accel::reduceWeightedControlsDevice(
-        device_controls, device_costs, sample_count, dim_u, horizon, gamma_u,
-        host_control);
-    Eigen::MatrixXd result = Eigen::MatrixXd::Zero(dim_u, horizon);
-    for (int d = 0; d < dim_u; ++d)
-        for (int t = 0; t < horizon; ++t)
-            result(d, t) = host_control[d * horizon + t];
-    h(result);
-    return result;
-}
-
 // ── Raw rollout helpers for ablation variants ───────────────────
-void BiMPPI_GPU::forwardRawRollout(Eigen::VectorXd &costs,
+void BiMPPI_GPU_Legacy::forwardRawRollout(Eigen::VectorXd &costs,
                                    Eigen::MatrixXd &Ui_cpu) {
     auto t0=std::chrono::high_resolution_clock::now();
     auto ff=eigen_to_flat(U_f0,dim_u,Tf);
@@ -440,12 +436,24 @@ void BiMPPI_GPU::forwardRawRollout(Eigen::VectorXd &costs,
     CUDA_CHECK(cudaMemcpy(d_x_init,  x_init.data(),  dim_x*sizeof(double),cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemcpy(d_x_target,x_target.data(),dim_x*sizeof(double),cudaMemcpyHostToDevice));
     size_t nc=(size_t)Nf*dim_u*Tf; if(nc%2)nc++;
+    if (!curand_gen) {
+        CURAND_CHECK(curandCreateGenerator(&curand_gen, CURAND_RNG_PSEUDO_PHILOX4_32_10));
+        CURAND_CHECK(curandSetPseudoRandomGeneratorSeed(
+            curand_gen, static_cast<unsigned long long>(std::time(nullptr))));
+    }
     CURAND_CHECK(curandGenerateNormalDouble(curand_gen,d_noise_f,nc,0.0,1.0));
     int B=256,G=(Nf+B-1)/B;
     bi_rollout_kernel<<<G,B>>>(d_Uf0,d_Ufi,d_noise_f,d_sigma,d_x_init,d_x_target,
         d_costs_f,d_Di_f,with_map,d_map,map_max_row,map_max_col,map_resolution,
-        d_circles,n_circles,d_rects,n_rects,Nf,dim_u,dim_x,Tf,(double)dt,gamma_u,model_type,true);
+        d_circles,n_circles,d_rects,n_rects,d_ws_boxes,n_ws_boxes,
+        ws_link_radius,ws_safe_margin,ws_hard_margin,
+        Nf,dim_u,dim_x,Tf,(double)dt,gamma_u,model_type,true);
     CUDA_CHECK(cudaGetLastError()); CUDA_CHECK(cudaDeviceSynchronize());
+    rollout_ee_export::emit(rollout_ee_callback, "forward", d_Ufi, d_x_init,
+                            Nf, dim_u, dim_x, Tf, (double)dt, model_type);
+    rollout_state_export::emit(rollout_state_callback, "forward", d_Ufi,
+                               d_x_init, Nf, dim_u, dim_x, Tf, (double)dt,
+                               model_type);
     auto t1=std::chrono::high_resolution_clock::now();
     elapsed_rollout+=std::chrono::duration<double>(t1-t0).count();
 
@@ -456,7 +464,7 @@ void BiMPPI_GPU::forwardRawRollout(Eigen::VectorXd &costs,
     Ui_cpu=flat_Ui_to_eigen(hUi,Nf,dim_u,Tf);
 }
 
-void BiMPPI_GPU::backwardRawRollout(Eigen::VectorXd &costs,
+void BiMPPI_GPU_Legacy::backwardRawRollout(Eigen::VectorXd &costs,
                                     Eigen::MatrixXd &Ui_cpu) {
     auto t0=std::chrono::high_resolution_clock::now();
     auto bf=eigen_to_flat(U_b0,dim_u,Tb);
@@ -464,12 +472,25 @@ void BiMPPI_GPU::backwardRawRollout(Eigen::VectorXd &costs,
     CUDA_CHECK(cudaMemcpy(d_x_target,x_target.data(),dim_x*sizeof(double),cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemcpy(d_Ub0,bf.data(),dim_u*Tb*sizeof(double),cudaMemcpyHostToDevice));
     size_t nc=(size_t)Nb*dim_u*Tb; if(nc%2)nc++;
+    if (!curand_gen) {
+        CURAND_CHECK(curandCreateGenerator(&curand_gen, CURAND_RNG_PSEUDO_PHILOX4_32_10));
+        CURAND_CHECK(curandSetPseudoRandomGeneratorSeed(
+            curand_gen, static_cast<unsigned long long>(std::time(nullptr))));
+    }
     CURAND_CHECK(curandGenerateNormalDouble(curand_gen,d_noise_b,nc,0.0,1.0));
     int B=256,G=(Nb+B-1)/B;
     backward_rollout_kernel<<<G,B>>>(d_Ub0,d_Ubi,d_noise_b,d_sigma,d_x_init,d_x_target,
         d_costs_b,d_Di_b,with_map,d_map,map_max_row,map_max_col,map_resolution,
-        d_circles,n_circles,d_rects,n_rects,Nb,dim_u,dim_x,Tb,(double)dt,gamma_u,model_type);
+        d_circles,n_circles,d_rects,n_rects,d_ws_boxes,n_ws_boxes,
+        ws_link_radius,ws_safe_margin,ws_hard_margin,
+        Nb,dim_u,dim_x,Tb,(double)dt,gamma_u,model_type);
     CUDA_CHECK(cudaGetLastError()); CUDA_CHECK(cudaDeviceSynchronize());
+    rollout_ee_export::emit(rollout_ee_callback, "backward", d_Ubi,
+                            d_x_target, Nb, dim_u, dim_x, Tb, (double)dt,
+                            model_type, true);
+    rollout_state_export::emit(rollout_state_callback, "backward", d_Ubi,
+                               d_x_target, Nb, dim_u, dim_x, Tb, (double)dt,
+                               model_type, true);
     auto t1=std::chrono::high_resolution_clock::now();
     elapsed_rollout+=std::chrono::duration<double>(t1-t0).count();
 
@@ -481,7 +502,7 @@ void BiMPPI_GPU::backwardRawRollout(Eigen::VectorXd &costs,
 }
 
 // ── DBSCAN (CPU) ──────────────────────────────────────────────────
-void BiMPPI_GPU::dbscan(std::vector<std::vector<int>>& clusters,
+void BiMPPI_GPU_Legacy::dbscan(std::vector<std::vector<int>>& clusters,
                          const Eigen::MatrixXd& feature_source,
                          const Eigen::VectorXd& costs, int Ns) {
     clusters.clear();
@@ -501,7 +522,7 @@ void BiMPPI_GPU::dbscan(std::vector<std::vector<int>>& clusters,
     const Eigen::MatrixXd* feature_ptr = &feature_source;
 
     const bool source_is_control_sequence =
-        (feature_source.rows() == Ns * dim_u && feature_source.cols() > 0);
+        (feature_source.rows() == Ns * dim_u && feature_source.cols() >= kNumBlocks);
 
     if (source_is_control_sequence) {
         const int T_steps = static_cast<int>(feature_source.cols());
@@ -627,43 +648,8 @@ void BiMPPI_GPU::dbscan(std::vector<std::vector<int>>& clusters,
     }
 }
 
-// ── fastsc K-means (GPU, using the same feature construction as DBSCAN) ──
-void BiMPPI_GPU::kmeansCluster(
-    std::vector<std::vector<int>>& clusters,
-    const Eigen::MatrixXd& feature_source, const Eigen::VectorXd& costs,
-    int sample_count) {
-    constexpr int kNumBlocks = 3;
-    Eigen::MatrixXd block_feature;
-    const Eigen::MatrixXd* feature_ptr = &feature_source;
-
-    const bool source_is_control_sequence =
-        feature_source.rows() == sample_count * dim_u &&
-        feature_source.cols() > 0;
-    if (source_is_control_sequence) {
-        const int time_steps = static_cast<int>(feature_source.cols());
-        block_feature = Eigen::MatrixXd::Zero(kNumBlocks * dim_u, sample_count);
-        for (int i = 0; i < sample_count; ++i) {
-            for (int block = 0; block < kNumBlocks; ++block) {
-                const int t0 = (block * time_steps) / kNumBlocks;
-                const int t1 = ((block + 1) * time_steps) / kNumBlocks;
-                const int length = std::max(1, t1 - t0);
-                for (int d = 0; d < dim_u; ++d) {
-                    double sum = 0.0;
-                    for (int t = t0; t < t1; ++t)
-                        sum += feature_source(i * dim_u + d, t);
-                    block_feature(block * dim_u + d, i) = sum / length;
-                }
-            }
-        }
-        feature_ptr = &block_feature;
-    }
-
-    runGPUKMeans(clusters, *feature_ptr, costs,
-                 {kmeans_clusters, kmeans_max_iterations, kmeans_threshold});
-}
-
 // ── calculateU (CPU) ──────────────────────────────────────────────
-void BiMPPI_GPU::calculateU(Eigen::MatrixXd& Uout,
+void BiMPPI_GPU_Legacy::calculateU(Eigen::MatrixXd& Uout,
                              const std::vector<std::vector<int>>& clusters,
                              const Eigen::VectorXd& costs,
                              const Eigen::MatrixXd& Ui_cpu, int T_steps) {
@@ -683,7 +669,7 @@ void BiMPPI_GPU::calculateU(Eigen::MatrixXd& Uout,
     }
 }
 
-void BiMPPI_GPU::launchForwardSampling() {
+void BiMPPI_GPU_Legacy::launchForwardSampling() {
     auto t0=std::chrono::high_resolution_clock::now();
     auto ff=eigen_to_flat(U_f0,dim_u,Tf);
     CUDA_CHECK(cudaMemcpy(d_Uf0,ff.data(),dim_u*Tf*sizeof(double),cudaMemcpyHostToDevice));
@@ -694,33 +680,36 @@ void BiMPPI_GPU::launchForwardSampling() {
     int B=256,G=(Nf+B-1)/B;
     bi_rollout_kernel<<<G,B>>>(d_Uf0,d_Ufi,d_noise_f,d_sigma,d_x_init,d_x_target,
         d_costs_f,d_Di_f,with_map,d_map,map_max_row,map_max_col,map_resolution,
-        d_circles,n_circles,d_rects,n_rects,Nf,dim_u,dim_x,Tf,(double)dt,gamma_u,model_type,true);
+        d_circles,n_circles,d_rects,n_rects,d_ws_boxes,n_ws_boxes,
+        ws_link_radius,ws_safe_margin,ws_hard_margin,
+        Nf,dim_u,dim_x,Tf,(double)dt,gamma_u,model_type,true);
     CUDA_CHECK(cudaGetLastError()); CUDA_CHECK(cudaDeviceSynchronize());
+    rollout_ee_export::emit(rollout_ee_callback, "forward", d_Ufi, d_x_init,
+                            Nf, dim_u, dim_x, Tf, (double)dt, model_type);
+    rollout_state_export::emit(rollout_state_callback, "forward", d_Ufi,
+                               d_x_init, Nf, dim_u, dim_x, Tf, (double)dt,
+                               model_type);
     auto t1=std::chrono::high_resolution_clock::now();
     elapsed_rollout+=std::chrono::duration<double>(t1-t0).count();
 }
 
 // ── forwardRollout ────────────────────────────────────────────────
-void BiMPPI_GPU::forwardRollout() {
+void BiMPPI_GPU_Legacy::forwardRollout() {
     launchForwardSampling();
     const auto t1=std::chrono::high_resolution_clock::now();
-    appendDeviceVisRolloutSamples(d_Ufi, Nf, Tf, false);
+    std::vector<double> hc(Nf), hUi((size_t)Nf * dim_u * Tf);
+    CUDA_CHECK(cudaMemcpy(hc.data(), d_costs_f, Nf * sizeof(double), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(hUi.data(), d_Ufi, (size_t)Nf * dim_u * Tf * sizeof(double), cudaMemcpyDeviceToHost));
+    Eigen::VectorXd costs_f = Eigen::Map<Eigen::VectorXd>(hc.data(), Nf);
+    Eigen::MatrixXd Ui_f = flat_Ui_to_eigen(hUi, Nf, dim_u, Tf);
+    appendVisRolloutSamples(Ui_f, Nf, Tf, false);
     clusters_f.clear();
-    if (clustering_method == ClusteringMethod::KMeans) {
-        clusterControlsDevice(d_Ufi, d_costs_f, Nf, Tf, Uf, clusters_f);
-    } else {
-        std::vector<double> hc(Nf), hUi((size_t)Nf * dim_u * Tf);
-        CUDA_CHECK(cudaMemcpy(hc.data(), d_costs_f, Nf * sizeof(double),
-                              cudaMemcpyDeviceToHost));
-        CUDA_CHECK(cudaMemcpy(hUi.data(), d_Ufi,
-                              (size_t)Nf * dim_u * Tf * sizeof(double),
-                              cudaMemcpyDeviceToHost));
-        Eigen::VectorXd costs_f = Eigen::Map<Eigen::VectorXd>(hc.data(), Nf);
-        Eigen::MatrixXd Ui_f = flat_Ui_to_eigen(hUi, Nf, dim_u, Tf);
+    if (clustering_method == ClusteringMethod::KMeans)
+        kmeansCluster(clusters_f, Ui_f, costs_f, Nf);
+    else
         dbscan(clusters_f, Ui_f, costs_f, Nf);
-        if(clusters_f.empty()) clusters_f.push_back(full_cluster_f);
-        calculateU(Uf,clusters_f,costs_f,Ui_f,Tf);
-    }
+    if(clusters_f.empty()) clusters_f.push_back(full_cluster_f);
+    calculateU(Uf,clusters_f,costs_f,Ui_f,Tf);
     Xf.resize(clusters_f.size()*dim_x,Tf+1);
     for(int ci=0;ci<(int)clusters_f.size();++ci){
         Xf.block(ci*dim_x,0,dim_x,1)=x_init;
@@ -732,7 +721,7 @@ void BiMPPI_GPU::forwardRollout() {
     elapsed_clustering+=std::chrono::duration<double>(std::chrono::high_resolution_clock::now()-t1).count();
 }
 
-void BiMPPI_GPU::launchBackwardSampling() {
+void BiMPPI_GPU_Legacy::launchBackwardSampling() {
     auto t0=std::chrono::high_resolution_clock::now();
     auto bf=eigen_to_flat(U_b0,dim_u,Tb);
     CUDA_CHECK(cudaMemcpy(d_x_init,  x_init.data(),  dim_x*sizeof(double),cudaMemcpyHostToDevice));
@@ -743,33 +732,37 @@ void BiMPPI_GPU::launchBackwardSampling() {
     int B=256,G=(Nb+B-1)/B;
     backward_rollout_kernel<<<G,B>>>(d_Ub0,d_Ubi,d_noise_b,d_sigma,d_x_init,d_x_target,
         d_costs_b,d_Di_b,with_map,d_map,map_max_row,map_max_col,map_resolution,
-        d_circles,n_circles,d_rects,n_rects,Nb,dim_u,dim_x,Tb,(double)dt,gamma_u,model_type);
+        d_circles,n_circles,d_rects,n_rects,d_ws_boxes,n_ws_boxes,
+        ws_link_radius,ws_safe_margin,ws_hard_margin,
+        Nb,dim_u,dim_x,Tb,(double)dt,gamma_u,model_type);
     CUDA_CHECK(cudaGetLastError()); CUDA_CHECK(cudaDeviceSynchronize());
+    rollout_ee_export::emit(rollout_ee_callback, "backward", d_Ubi,
+                            d_x_target, Nb, dim_u, dim_x, Tb, (double)dt,
+                            model_type, true);
+    rollout_state_export::emit(rollout_state_callback, "backward", d_Ubi,
+                               d_x_target, Nb, dim_u, dim_x, Tb, (double)dt,
+                               model_type, true);
     auto t1=std::chrono::high_resolution_clock::now();
     elapsed_rollout+=std::chrono::duration<double>(t1-t0).count();
 }
 
 // ── backwardRollout ───────────────────────────────────────────────
-void BiMPPI_GPU::backwardRollout() {
+void BiMPPI_GPU_Legacy::backwardRollout() {
     launchBackwardSampling();
     const auto t1=std::chrono::high_resolution_clock::now();
-    appendDeviceVisRolloutSamples(d_Ubi, Nb, Tb, true);
+    std::vector<double> hc(Nb), hUi((size_t)Nb * dim_u * Tb);
+    CUDA_CHECK(cudaMemcpy(hc.data(), d_costs_b, Nb * sizeof(double), cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(hUi.data(), d_Ubi, (size_t)Nb * dim_u * Tb * sizeof(double), cudaMemcpyDeviceToHost));
+    Eigen::VectorXd costs_b = Eigen::Map<Eigen::VectorXd>(hc.data(), Nb);
+    Eigen::MatrixXd Ui_b = flat_Ui_to_eigen(hUi, Nb, dim_u, Tb);
+    appendVisRolloutSamples(Ui_b, Nb, Tb, true);
     clusters_b.clear();
-    if (clustering_method == ClusteringMethod::KMeans) {
-        clusterControlsDevice(d_Ubi, d_costs_b, Nb, Tb, Ub, clusters_b);
-    } else {
-        std::vector<double> hc(Nb), hUi((size_t)Nb * dim_u * Tb);
-        CUDA_CHECK(cudaMemcpy(hc.data(), d_costs_b, Nb * sizeof(double),
-                              cudaMemcpyDeviceToHost));
-        CUDA_CHECK(cudaMemcpy(hUi.data(), d_Ubi,
-                              (size_t)Nb * dim_u * Tb * sizeof(double),
-                              cudaMemcpyDeviceToHost));
-        Eigen::VectorXd costs_b = Eigen::Map<Eigen::VectorXd>(hc.data(), Nb);
-        Eigen::MatrixXd Ui_b = flat_Ui_to_eigen(hUi, Nb, dim_u, Tb);
+    if (clustering_method == ClusteringMethod::KMeans)
+        kmeansCluster(clusters_b, Ui_b, costs_b, Nb);
+    else
         dbscan(clusters_b, Ui_b, costs_b, Nb);
-        if(clusters_b.empty()) clusters_b.push_back(full_cluster_b);
-        calculateU(Ub,clusters_b,costs_b,Ui_b,Tb);
-    }
+    if(clusters_b.empty()) clusters_b.push_back(full_cluster_b);
+    calculateU(Ub,clusters_b,costs_b,Ui_b,Tb);
     Xb.resize(clusters_b.size()*dim_x,Tb+1);
     for(int ci=0;ci<(int)clusters_b.size();++ci){
         Xb.block(ci*dim_x,Tb,dim_x,1)=x_target;
@@ -784,38 +777,21 @@ void BiMPPI_GPU::backwardRollout() {
 }
 
 // ── selectConnection ──────────────────────────────────────────────
-double BiMPPI_GPU::connectionMetricDistance(
-    const Eigen::Ref<const Eigen::VectorXd> &xf,
-    const Eigen::Ref<const Eigen::VectorXd> &xb) const {
-    if (connection_metric == ConnectionMetric::SE2 && dim_x >= 3) {
-        const double dx = xf(0) - xb(0);
-        const double dy = xf(1) - xb(1);
-        const double dtheta = std::atan2(std::sin(xf(2) - xb(2)),
-                                         std::cos(xf(2) - xb(2)));
-        return std::sqrt(se2_connection_xy_weight * (dx * dx + dy * dy) +
-                         se2_connection_theta_weight * (dtheta * dtheta));
-    }
-
-    return (xf - xb).norm();
-}
-
-void BiMPPI_GPU::selectConnection() {
+void BiMPPI_GPU_Legacy::selectConnection() {
     joints.clear();
     for(int cf=0;cf<(int)clusters_f.size();++cf){
         double mn=std::numeric_limits<double>::max(); int cb=0,df_=0,db_=0;
         for(int cb_=0;cb_<(int)clusters_b.size();++cb_)
             for(int df__=0;df__<=Tf;++df__)
                 for(int db__=0;db__<=Tb;++db__){
-                    const double n = connectionMetricDistance(
-                        Xf.block(cf * dim_x, df__, dim_x, 1),
-                        Xb.block(cb_ * dim_x, db__, dim_x, 1));
+                    double n=(Xf.block(cf*dim_x,df__,dim_x,1)-Xb.block(cb_*dim_x,db__,dim_x,1)).norm();
                     if(n<mn){mn=n;cb=cb_;df_=df__;db_=db__;}
                 }
         joints.push_back({cf,cb,df_,db_});
     }
 }
 
-double BiMPPI_GPU::connectionDistance() const {
+double BiMPPI_GPU_Legacy::connectionDistance() const {
     double total = 0.0;
     int count = 0;
     for (const auto& joint : joints) {
@@ -826,10 +802,9 @@ double BiMPPI_GPU::connectionDistance() const {
             df > Tf || db > Tb) {
             continue;
         }
-        const double distance = connectionMetricDistance(
-            Xf.block(cf * dim_x, df, dim_x, 1),
-            Xb.block(cb * dim_x, db, dim_x, 1));
-        total += distance;
+        total += (Xf.block(cf * dim_x, df, dim_x, 1) -
+                  Xb.block(cb * dim_x, db, dim_x, 1))
+                     .norm();
         ++count;
     }
     if (count == 0) {
@@ -839,7 +814,7 @@ double BiMPPI_GPU::connectionDistance() const {
 }
 
 // ── concatenate ───────────────────────────────────────────────────
-void BiMPPI_GPU::concatenate() {
+void BiMPPI_GPU_Legacy::concatenate() {
     Uc.clear(); Xc.clear();
     for(auto& j:joints){
         int cf=j[0],cb=j[1],df=j[2],db=j[3],len=std::max(Tf,df+(Tb-db));
@@ -862,7 +837,15 @@ void BiMPPI_GPU::concatenate() {
 }
 
 // ── guideMPPI ─────────────────────────────────────────────────────
-void BiMPPI_GPU::guideMPPI() {
+void BiMPPI_GPU_Legacy::guideMPPI() {
+    guideMPPIImpl(false);
+}
+
+void BiMPPI_GPU_Legacy::guideMPPIDevice() {
+    guideMPPIImpl(true);
+}
+
+void BiMPPI_GPU_Legacy::guideMPPIImpl(bool device_reduction) {
     Ur.clear(); Cr.clear(); Xr.clear();
     for(int r=0;r<(int)joints.size();++r){
         int Tr=Uc[r].cols();
@@ -876,11 +859,36 @@ void BiMPPI_GPU::guideMPPI() {
         CURAND_CHECK(curandGenerateNormalDouble(curand_gen,d_noise_r,ncnt,0.0,1.0));
         int B=256,G=(Nr+B-1)/B;
         guide_rollout_kernel<<<G,B>>>(d_Ur0,d_Uri,d_noise_r,d_sigma,d_x_init,d_x_target,d_Xref,d_costs_r,
-            with_map,d_map,map_max_row,map_max_col,map_resolution,d_circles,n_circles,d_rects,n_rects,
+            with_map,d_map,map_max_row,map_max_col,map_resolution,d_circles,n_circles,d_rects,n_rects,d_ws_boxes,n_ws_boxes,
+            ws_link_radius,ws_safe_margin,ws_hard_margin,
             Nr,dim_u,dim_x,Tr,(double)dt,gamma_u,model_type);
         CUDA_CHECK(cudaGetLastError()); CUDA_CHECK(cudaDeviceSynchronize());
-        Eigen::MatrixXd Ures =
-            reduceControlsDevice(d_Uri, d_costs_r, Nr, Tr);
+        rollout_ee_export::emit(rollout_ee_callback,
+                                "guide_" + std::to_string(r), d_Uri,
+                                d_x_init, Nr, dim_u, dim_x, Tr, (double)dt,
+                                model_type);
+        rollout_state_export::emit(rollout_state_callback,
+                                   "guide_" + std::to_string(r), d_Uri,
+                                   d_x_init, Nr, dim_u, dim_x, Tr, (double)dt,
+                                   model_type);
+        Eigen::MatrixXd Ures=Eigen::MatrixXd::Zero(dim_u,Tr);
+        if (device_reduction) {
+            std::vector<double> reduced;
+            cuda_accel::reduceWeightedControlsDevice(
+                d_Uri, d_costs_r, Nr, dim_u, Tr, gamma_u, reduced);
+            for(int d=0;d<dim_u;++d) for(int t=0;t<Tr;++t)
+                Ures(d,t)=reduced[d*Tr+t];
+        } else {
+            std::vector<double> hcr(Nr),hri((size_t)Nr*dim_u*Tr);
+            CUDA_CHECK(cudaMemcpy(hcr.data(),d_costs_r,Nr*sizeof(double),cudaMemcpyDeviceToHost));
+            CUDA_CHECK(cudaMemcpy(hri.data(),d_Uri,(size_t)Nr*dim_u*Tr*sizeof(double),cudaMemcpyDeviceToHost));
+            Eigen::VectorXd costs_r=Eigen::Map<Eigen::VectorXd>(hcr.data(),Nr);
+            double mc=costs_r.minCoeff();
+            Eigen::VectorXd wts=(-gamma_u*(costs_r.array()-mc)).exp(); wts/=wts.sum();
+            for(int i=0;i<Nr;++i) for(int d=0;d<dim_u;++d) for(int t=0;t<Tr;++t)
+                Ures(d,t)+=wts(i)*hri[i*(dim_u*Tr)+d*Tr+t];
+        }
+        h(Ures);
         Eigen::MatrixXd Xi(dim_x,Tr+1); Xi.col(0)=x_init; double cost=0.0;
         for(int t=0;t<Tr;++t){
             Xi.col(t+1)=Xi.col(t)+(double)dt*f(Xi.col(t), Ures.col(t));
@@ -923,7 +931,7 @@ void BiMPPI_GPU::guideMPPI() {
     Uo=Ur[idx]; Xo=Xr[idx]; u0=Uo.col(0);
 }
 
-void BiMPPI_GPU::guideReference(const Eigen::MatrixXd &Uref,
+void BiMPPI_GPU_Legacy::guideReference(const Eigen::MatrixXd &Uref,
                                 const Eigen::MatrixXd &Xref) {
     const int Tr = static_cast<int>(Uref.cols());
     if (Tr <= 0 || Uref.rows() != dim_u || Xref.rows() != dim_x ||
@@ -960,13 +968,37 @@ void BiMPPI_GPU::guideReference(const Eigen::MatrixXd &Uref,
     guide_rollout_kernel<<<G, B>>>(
         d_Ur0, d_Uri, d_noise_r, d_sigma, d_x_init, d_x_target, d_Xref,
         d_costs_r, with_map, d_map, map_max_row, map_max_col, map_resolution,
-        d_circles, n_circles, d_rects, n_rects, Nr, dim_u, dim_x, Tr,
+        d_circles, n_circles, d_rects, n_rects, d_ws_boxes, n_ws_boxes,
+        ws_link_radius, ws_safe_margin, ws_hard_margin, Nr, dim_u, dim_x, Tr,
         (double)dt, gamma_u, model_type);
     CUDA_CHECK(cudaGetLastError());
     CUDA_CHECK(cudaDeviceSynchronize());
 
-    Eigen::MatrixXd Ures =
-        reduceControlsDevice(d_Uri, d_costs_r, Nr, Tr);
+    std::vector<double> hcr(Nr), hri((size_t)Nr * dim_u * Tr);
+    CUDA_CHECK(cudaMemcpy(hcr.data(), d_costs_r, Nr * sizeof(double),
+                          cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(hri.data(), d_Uri,
+                          (size_t)Nr * dim_u * Tr * sizeof(double),
+                          cudaMemcpyDeviceToHost));
+    Eigen::VectorXd costs_r = Eigen::Map<Eigen::VectorXd>(hcr.data(), Nr);
+    double mc = costs_r.minCoeff();
+    Eigen::VectorXd wts = (-gamma_u * (costs_r.array() - mc)).exp();
+    const double weight_sum = wts.sum();
+    if (std::isfinite(weight_sum) && weight_sum > 0.0) {
+        wts /= weight_sum;
+    } else {
+        wts = Eigen::VectorXd::Constant(Nr, 1.0 / static_cast<double>(Nr));
+    }
+
+    Eigen::MatrixXd Ures = Eigen::MatrixXd::Zero(dim_u, Tr);
+    for (int i = 0; i < Nr; ++i) {
+        for (int d = 0; d < dim_u; ++d) {
+            for (int t = 0; t < Tr; ++t) {
+                Ures(d, t) += wts(i) * hri[i * (dim_u * Tr) + d * Tr + t];
+            }
+        }
+    }
+    h(Ures);
 
     Eigen::MatrixXd Xi(dim_x, Tr + 1);
     Xi.col(0) = x_init;
@@ -1016,28 +1048,12 @@ void BiMPPI_GPU::guideReference(const Eigen::MatrixXd &Uref,
     elapsed_guide += std::chrono::duration<double>(t1 - t0).count();
 }
 
-void BiMPPI_GPU::partitioningControl() {
+void BiMPPI_GPU_Legacy::partitioningControl() {
     U_f0=Uo.leftCols(Tf);
     U_b0=Eigen::MatrixXd::Zero(dim_u,Tb);
 }
 
-double BiMPPI_GPU::evaluateTrajectoryCost(
-    const Eigen::MatrixXd &trajectory) const {
-    if (trajectory.rows() != dim_x || trajectory.cols() == 0 || !p) {
-        return std::numeric_limits<double>::quiet_NaN();
-    }
-
-    double value = 0.0;
-    for (int t = 0; t < trajectory.cols(); ++t) {
-        value += p(trajectory.col(t), x_target);
-        if (collision_checker && collision_checker->getCollisionGrid(trajectory.col(t))) {
-            return 1e8;
-        }
-    }
-    return value;
-}
-
-void BiMPPI_GPU::solve() {
+void BiMPPI_GPU_Legacy::solve() {
     elapsed_rollout=elapsed_clustering=0.0;
     vis_rollout_samples.clear();
     start=std::chrono::high_resolution_clock::now();
@@ -1052,7 +1068,6 @@ void BiMPPI_GPU::solve() {
     elapsed_1=t4-start;
     partitioningControl();
     elapsed=elapsed_rollout+elapsed_clustering+elapsed_connection+elapsed_guide;
-    cost = evaluateTrajectoryCost(Xo);
 
     // ── Visualization data export ──
     if (vis_logger && vis_logger->enabled) {
@@ -1074,14 +1089,13 @@ void BiMPPI_GPU::solve() {
         vis_logger->saveTrajectories("guide_candidates", Xr);
       // Optimal trajectory
       vis_logger->saveTrajectory("optimal", Xo);
-      vis_logger->saveOptimalCost(cost);
       vis_logger->savePosition(x_init);
     }
 
     visual_traj.push_back(x_init);
 }
 
-void BiMPPI_GPU::move() {
+void BiMPPI_GPU_Legacy::move() {
     x_init=x_init+(double)dt*f(x_init, u0);
     U_f0.leftCols(U_f0.cols()-1)=U_f0.rightCols(U_f0.cols()-1);
 }
