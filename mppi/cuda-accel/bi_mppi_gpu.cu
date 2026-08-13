@@ -58,7 +58,8 @@ __global__ void backward_rollout_kernel(
     double cost = 0.0;
     bool hit = false;
     if (legacy_cuda_collision_grid(x, with_map, d_map, max_row, max_col, res,
-                                   d_circles, n_circ, d_rects, n_rect)) {
+                                   d_circles, n_circ, d_rects, n_rect,
+                                   model_type)) {
         hit = true; cost = 1e8;
     }
 
@@ -72,9 +73,17 @@ __global__ void backward_rollout_kernel(
         legacy_cuda_dynamics(x, u_local, xd_, dim_x, dim_u, model_type);
         for (int d = 0; d < dim_x; ++d) xn[d] = x[d] - dt * xd_[d];
         for (int d = 0; d < dim_x; ++d) x[d] = xn[d];
-        cost += legacy_cuda_terminal_cost(x, d_x_init, dim_x, model_type);
+        if (model_type == LEGACY_CUDA_MANIPULATOR && dim_x >= 12 &&
+            dim_u >= 6) {
+            cost += dt * legacy_cuda_stage_cost(x, u_local, dim_x, dim_u,
+                                                model_type, d_rects, n_rect);
+            cost += legacy_cuda_terminal_cost(x, d_x_init, dim_x, model_type);
+        } else {
+            cost += legacy_cuda_terminal_cost(x, d_x_init, dim_x, model_type);
+        }
         if (legacy_cuda_collision_grid(x, with_map, d_map, max_row, max_col, res,
-                                       d_circles, n_circ, d_rects, n_rect)) {
+                                       d_circles, n_circ, d_rects, n_rect,
+                                       model_type)) {
             hit = true; cost = 1e8;
         }
     }
@@ -119,13 +128,13 @@ __global__ void guide_rollout_kernel(
     bool hit = false;
     double guide_cost = 0.0;
     if (legacy_cuda_collision_grid(x, with_map, d_map, max_row, max_col, res,
-                                   d_circles, n_circ, d_rects, n_rect)) {
+                                   d_circles, n_circ, d_rects, n_rect,
+                                   model_type)) {
         hit = true; cost = 1e8;
     }
 
     for (int t = 0; t < Tr; ++t) {
         if (hit) break;
-        cost += legacy_cuda_terminal_cost(x, d_x_target, dim_x, model_type);
         double gc = 0.0;
         for (int d = 0; d < dim_x; ++d) {
             double diff = x[d] - d_Xref[d*(Tr+1)+t];
@@ -134,13 +143,21 @@ __global__ void guide_rollout_kernel(
         guide_cost += sqrt(gc);
         double u_local[GPU_MAX_DIM_U];
         for (int _d = 0; _d < dim_u; ++_d) u_local[_d] = Ui_i[_d*Tr+t];
+        if (model_type == LEGACY_CUDA_MANIPULATOR && dim_x >= 12 &&
+            dim_u >= 6) {
+            cost += dt * legacy_cuda_stage_cost(x, u_local, dim_x, dim_u,
+                                                model_type, d_rects, n_rect);
+            cost += legacy_cuda_terminal_cost(x, d_x_target, dim_x, model_type);
+        } else {
+            cost += legacy_cuda_terminal_cost(x, d_x_target, dim_x, model_type);
+        }
         legacy_cuda_dynamics(x, u_local, xd_, dim_x, dim_u, model_type);
         for (int d = 0; d < dim_x; ++d) xn[d] = x[d] + dt*xd_[d];
 
         for (int d = 0; d < dim_x; ++d) x[d] = xn[d];
         if (legacy_cuda_collision_grid(x, with_map, d_map, max_row, max_col,
                                        res, d_circles, n_circ, d_rects,
-                                       n_rect)) {
+                                       n_rect, model_type)) {
             hit = true; cost = 1e8;
         }
     }
@@ -151,7 +168,12 @@ __global__ void guide_rollout_kernel(
             gc += diff*diff;
         }
         guide_cost += sqrt(gc);
-        cost = legacy_cuda_terminal_cost(x, d_x_target, dim_x, model_type);
+        if (!(model_type == LEGACY_CUDA_MANIPULATOR && dim_x >= 12 &&
+              dim_u >= 6)) {
+            cost = legacy_cuda_terminal_cost(x, d_x_target, dim_x, model_type);
+        } else {
+            cost += legacy_cuda_terminal_cost(x, d_x_target, dim_x, model_type);
+        }
         cost += guide_cost;
     }
     d_costs[i] = cost;
@@ -167,6 +189,10 @@ static void safe_cuda_malloc(double** ptr, size_t sz) {
 BiMPPI_GPU::~BiMPPI_GPU() {
     freeForward(); freeBackward(); freeGuide(); freeCommon();
     curandDestroyGenerator(curand_gen);
+    curandDestroyGenerator(curand_gen_forward);
+    curandDestroyGenerator(curand_gen_backward);
+    cudaStreamDestroy(stream_forward);
+    cudaStreamDestroy(stream_backward);
 }
 
 void BiMPPI_GPU::freeForward() {
@@ -241,6 +267,11 @@ void BiMPPI_GPU::init(BiMPPIParam p) {
     kmeans_max_iterations = p.kmeans_max_iterations;
     kmeans_threshold = p.kmeans_threshold;
 
+    if (U_f0.rows() != dim_u || U_f0.cols() != Tf)
+        U_f0 = Eigen::MatrixXd::Zero(dim_u, Tf);
+    if (U_b0.rows() != dim_u || U_b0.cols() != Tb)
+        U_b0 = Eigen::MatrixXd::Zero(dim_u, Tb);
+
     sigma_diag.resize(dim_u);
     for (int d = 0; d < dim_u; ++d) sigma_diag[d] = p.sigma_u(d,d);
 
@@ -280,6 +311,8 @@ void BiMPPI_GPU::setSE2ConnectionWeights(double xy_weight,
 }
 
 void BiMPPI_GPU::uploadCollisionData() {
+    if (!collision_checker) return;
+
     map_max_row = (int)collision_checker->map.size();
     map_max_col = map_max_row>0?(int)collision_checker->map[0].size():0;
     map_resolution = collision_checker->resolution;
@@ -301,14 +334,30 @@ void BiMPPI_GPU::uploadCollisionData() {
         std::vector<double> buf(n_circles*4);
         for (int i=0;i<n_circles;++i) for(int j=0;j<4;++j) buf[i*4+j]=collision_checker->circles[i][j];
         CUDA_CHECK(cudaMemcpy(d_circles,buf.data(),sz,cudaMemcpyHostToDevice));
+    } else {
+        safe_cuda_malloc(&d_circles, 0);
     }
-    n_rects=(int)collision_checker->rectangles.size();
-    if (n_rects>0) {
-        size_t sz=n_rects*4*sizeof(double);
-        safe_cuda_malloc(&d_rects,sz);
-        std::vector<double> buf(n_rects*4);
-        for (int i=0;i<n_rects;++i) for(int j=0;j<4;++j) buf[i*4+j]=collision_checker->rectangles[i][j];
-        CUDA_CHECK(cudaMemcpy(d_rects,buf.data(),sz,cudaMemcpyHostToDevice));
+    if (!collision_checker->workspace_boxes.empty()) {
+        n_rects = (int)collision_checker->workspace_boxes.size();
+        size_t sz = n_rects * 6 * sizeof(double);
+        safe_cuda_malloc(&d_rects, sz);
+        std::vector<double> buf(n_rects * 6);
+        for (int i = 0; i < n_rects; ++i)
+            for (int j = 0; j < 6; ++j)
+                buf[i * 6 + j] = collision_checker->workspace_boxes[i][j];
+        CUDA_CHECK(cudaMemcpy(d_rects, buf.data(), sz, cudaMemcpyHostToDevice));
+    } else if (!collision_checker->rectangles.empty()) {
+        n_rects = (int)collision_checker->rectangles.size();
+        size_t sz = n_rects * 4 * sizeof(double);
+        safe_cuda_malloc(&d_rects, sz);
+        std::vector<double> buf(n_rects * 4);
+        for (int i = 0; i < n_rects; ++i)
+            for (int j = 0; j < 4; ++j)
+                buf[i * 4 + j] = collision_checker->rectangles[i][j];
+        CUDA_CHECK(cudaMemcpy(d_rects, buf.data(), sz, cudaMemcpyHostToDevice));
+    } else {
+        n_rects = 0;
+        safe_cuda_malloc(&d_rects, 0);
     }
 }
 
@@ -332,6 +381,8 @@ void BiMPPI_GPU::appendVisRolloutSamples(const Eigen::MatrixXd &Ui_cpu,
         T_steps <= 0 || Ui_cpu.rows() < N_samples * dim_u) {
         return;
     }
+
+    std::lock_guard<std::mutex> lock(branch_state_mutex);
 
     if (vis_rollout_samples.size() >= kMaxSavedBiRollouts) {
         return;
@@ -371,15 +422,16 @@ void BiMPPI_GPU::appendVisRolloutSamples(const Eigen::MatrixXd &Ui_cpu,
 
 void BiMPPI_GPU::appendDeviceVisRolloutSamples(
     const double *device_controls, int sample_count, int horizon,
-    bool backward) {
+    bool backward, cudaStream_t stream) {
     if (!vis_logger || !vis_logger->enabled || sample_count <= 0) return;
     const int copied_samples =
         std::min(sample_count, vis_rollout_samples_per_call);
     std::vector<double> flat(
         static_cast<std::size_t>(copied_samples) * dim_u * horizon);
-    CUDA_CHECK(cudaMemcpy(flat.data(), device_controls,
-                          flat.size() * sizeof(double),
-                          cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpyAsync(flat.data(), device_controls,
+                               flat.size() * sizeof(double),
+                               cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK(cudaStreamSynchronize(stream));
     appendVisRolloutSamples(
         flat_Ui_to_eigen(flat, copied_samples, dim_u, horizon),
         copied_samples, horizon, backward);
@@ -388,32 +440,26 @@ void BiMPPI_GPU::appendDeviceVisRolloutSamples(
 void BiMPPI_GPU::clusterControlsDevice(
     const double *device_controls, const double *device_costs,
     int sample_count, int horizon, Eigen::MatrixXd &clustered_controls,
-    std::vector<std::vector<int>> &clusters) {
-    std::vector<int> active_clusters;
-    std::vector<double> host_controls;
-    runGPUKMeansControlsDevice(
-        device_controls, device_costs, sample_count, dim_u, horizon, gamma_u,
-        {kmeans_clusters, kmeans_max_iterations, kmeans_threshold},
-        active_clusters, host_controls);
+    std::vector<std::vector<int>> &clusters, cudaStream_t stream) {
+    const std::size_t control_count =
+        static_cast<std::size_t>(sample_count) * dim_u * horizon;
+    std::vector<double> host_controls(control_count);
+    std::vector<double> host_costs(sample_count);
+    CUDA_CHECK(cudaMemcpyAsync(host_controls.data(), device_controls,
+                               control_count * sizeof(double),
+                               cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK(cudaMemcpyAsync(host_costs.data(), device_costs,
+                               static_cast<std::size_t>(sample_count) *
+                                   sizeof(double),
+                               cudaMemcpyDeviceToHost, stream));
+    CUDA_CHECK(cudaStreamSynchronize(stream));
 
-    const int active_count = static_cast<int>(active_clusters.size());
-    clusters.assign(active_count, {});
-    clustered_controls =
-        Eigen::MatrixXd::Zero(active_count * dim_u, horizon);
-    const int control_size = dim_u * horizon;
-    for (int cluster = 0; cluster < active_count; ++cluster) {
-        clusters[cluster].push_back(active_clusters[cluster]);
-        const double *source =
-            host_controls.data() +
-            static_cast<std::size_t>(cluster) * control_size;
-        for (int d = 0; d < dim_u; ++d)
-            for (int t = 0; t < horizon; ++t)
-                clustered_controls(cluster * dim_u + d, t) =
-                    source[d * horizon + t];
-        Eigen::Ref<Eigen::MatrixXd> control =
-            clustered_controls.middleRows(cluster * dim_u, dim_u);
-        h(control);
-    }
+    const Eigen::MatrixXd controls =
+        flat_Ui_to_eigen(host_controls, sample_count, dim_u, horizon);
+    const Eigen::VectorXd costs =
+        Eigen::Map<const Eigen::VectorXd>(host_costs.data(), sample_count);
+    kmeansCluster(clusters, controls, costs, sample_count);
+    calculateU(clustered_controls, clusters, costs, controls, horizon);
 }
 
 Eigen::MatrixXd BiMPPI_GPU::reduceControlsDevice(
@@ -427,7 +473,7 @@ Eigen::MatrixXd BiMPPI_GPU::reduceControlsDevice(
     for (int d = 0; d < dim_u; ++d)
         for (int t = 0; t < horizon; ++t)
             result(d, t) = host_control[d * horizon + t];
-    h(result);
+    if (h) h(result);
     return result;
 }
 
@@ -679,42 +725,49 @@ void BiMPPI_GPU::calculateU(Eigen::MatrixXd& Uout,
         for(int i=0;i<pts;++i)
             Uout.middleRows(idx*dim_u,dim_u)+=(wts[i]/tw)*Ui_cpu.middleRows(clusters[idx][i]*dim_u,dim_u);
         Eigen::Ref<Eigen::MatrixXd> slice = Uout.middleRows(idx*dim_u, dim_u);
-        h(slice);
+        if (h) h(slice);
     }
 }
 
 void BiMPPI_GPU::launchForwardSampling() {
     auto t0=std::chrono::high_resolution_clock::now();
     auto ff=eigen_to_flat(U_f0,dim_u,Tf);
-    CUDA_CHECK(cudaMemcpy(d_Uf0,ff.data(),dim_u*Tf*sizeof(double),cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_x_init,  x_init.data(),  dim_x*sizeof(double),cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_x_target,x_target.data(),dim_x*sizeof(double),cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpyAsync(d_Uf0,ff.data(),dim_u*Tf*sizeof(double),
+                               cudaMemcpyHostToDevice, stream_forward));
     size_t nc=(size_t)Nf*dim_u*Tf; if(nc%2)nc++;
-    CURAND_CHECK(curandGenerateNormalDouble(curand_gen,d_noise_f,nc,0.0,1.0));
+    CURAND_CHECK(curandGenerateNormalDouble(curand_gen_forward,d_noise_f,nc,
+                                            0.0,1.0));
     int B=256,G=(Nf+B-1)/B;
-    bi_rollout_kernel<<<G,B>>>(d_Uf0,d_Ufi,d_noise_f,d_sigma,d_x_init,d_x_target,
+    bi_rollout_kernel<<<G,B,0,stream_forward>>>(d_Uf0,d_Ufi,d_noise_f,d_sigma,
+        d_x_init,d_x_target,
         d_costs_f,d_Di_f,with_map,d_map,map_max_row,map_max_col,map_resolution,
         d_circles,n_circles,d_rects,n_rects,Nf,dim_u,dim_x,Tf,(double)dt,gamma_u,model_type,true);
-    CUDA_CHECK(cudaGetLastError()); CUDA_CHECK(cudaDeviceSynchronize());
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaStreamSynchronize(stream_forward));
     auto t1=std::chrono::high_resolution_clock::now();
-    elapsed_rollout+=std::chrono::duration<double>(t1-t0).count();
+    {
+        std::lock_guard<std::mutex> lock(branch_state_mutex);
+        elapsed_rollout+=std::chrono::duration<double>(t1-t0).count();
+    }
 }
 
 // ── forwardRollout ────────────────────────────────────────────────
 void BiMPPI_GPU::forwardRollout() {
     launchForwardSampling();
     const auto t1=std::chrono::high_resolution_clock::now();
-    appendDeviceVisRolloutSamples(d_Ufi, Nf, Tf, false);
+    appendDeviceVisRolloutSamples(d_Ufi, Nf, Tf, false, stream_forward);
     clusters_f.clear();
     if (clustering_method == ClusteringMethod::KMeans) {
-        clusterControlsDevice(d_Ufi, d_costs_f, Nf, Tf, Uf, clusters_f);
+        clusterControlsDevice(d_Ufi, d_costs_f, Nf, Tf, Uf, clusters_f,
+                              stream_forward);
     } else {
         std::vector<double> hc(Nf), hUi((size_t)Nf * dim_u * Tf);
-        CUDA_CHECK(cudaMemcpy(hc.data(), d_costs_f, Nf * sizeof(double),
-                              cudaMemcpyDeviceToHost));
-        CUDA_CHECK(cudaMemcpy(hUi.data(), d_Ufi,
-                              (size_t)Nf * dim_u * Tf * sizeof(double),
-                              cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpyAsync(hc.data(), d_costs_f, Nf * sizeof(double),
+                                   cudaMemcpyDeviceToHost, stream_forward));
+        CUDA_CHECK(cudaMemcpyAsync(hUi.data(), d_Ufi,
+                                   (size_t)Nf * dim_u * Tf * sizeof(double),
+                                   cudaMemcpyDeviceToHost, stream_forward));
+        CUDA_CHECK(cudaStreamSynchronize(stream_forward));
         Eigen::VectorXd costs_f = Eigen::Map<Eigen::VectorXd>(hc.data(), Nf);
         Eigen::MatrixXd Ui_f = flat_Ui_to_eigen(hUi, Nf, dim_u, Tf);
         dbscan(clusters_f, Ui_f, costs_f, Nf);
@@ -729,41 +782,51 @@ void BiMPPI_GPU::forwardRollout() {
                 (double)dt*f(Xf.block(ci*dim_x,t,dim_x,1), Uf.block(ci*dim_u,t,dim_u,1));
         }
     }
-    elapsed_clustering+=std::chrono::duration<double>(std::chrono::high_resolution_clock::now()-t1).count();
+    {
+        std::lock_guard<std::mutex> lock(branch_state_mutex);
+        elapsed_clustering+=std::chrono::duration<double>(std::chrono::high_resolution_clock::now()-t1).count();
+    }
 }
 
 void BiMPPI_GPU::launchBackwardSampling() {
     auto t0=std::chrono::high_resolution_clock::now();
     auto bf=eigen_to_flat(U_b0,dim_u,Tb);
-    CUDA_CHECK(cudaMemcpy(d_x_init,  x_init.data(),  dim_x*sizeof(double),cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_x_target,x_target.data(),dim_x*sizeof(double),cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_Ub0,bf.data(),dim_u*Tb*sizeof(double),cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpyAsync(d_Ub0,bf.data(),dim_u*Tb*sizeof(double),
+                               cudaMemcpyHostToDevice, stream_backward));
     size_t nc=(size_t)Nb*dim_u*Tb; if(nc%2)nc++;
-    CURAND_CHECK(curandGenerateNormalDouble(curand_gen,d_noise_b,nc,0.0,1.0));
+    CURAND_CHECK(curandGenerateNormalDouble(curand_gen_backward,d_noise_b,nc,
+                                            0.0,1.0));
     int B=256,G=(Nb+B-1)/B;
-    backward_rollout_kernel<<<G,B>>>(d_Ub0,d_Ubi,d_noise_b,d_sigma,d_x_init,d_x_target,
+    backward_rollout_kernel<<<G,B,0,stream_backward>>>(d_Ub0,d_Ubi,d_noise_b,
+        d_sigma,d_x_init,d_x_target,
         d_costs_b,d_Di_b,with_map,d_map,map_max_row,map_max_col,map_resolution,
         d_circles,n_circles,d_rects,n_rects,Nb,dim_u,dim_x,Tb,(double)dt,gamma_u,model_type);
-    CUDA_CHECK(cudaGetLastError()); CUDA_CHECK(cudaDeviceSynchronize());
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaStreamSynchronize(stream_backward));
     auto t1=std::chrono::high_resolution_clock::now();
-    elapsed_rollout+=std::chrono::duration<double>(t1-t0).count();
+    {
+        std::lock_guard<std::mutex> lock(branch_state_mutex);
+        elapsed_rollout+=std::chrono::duration<double>(t1-t0).count();
+    }
 }
 
 // ── backwardRollout ───────────────────────────────────────────────
 void BiMPPI_GPU::backwardRollout() {
     launchBackwardSampling();
     const auto t1=std::chrono::high_resolution_clock::now();
-    appendDeviceVisRolloutSamples(d_Ubi, Nb, Tb, true);
+    appendDeviceVisRolloutSamples(d_Ubi, Nb, Tb, true, stream_backward);
     clusters_b.clear();
     if (clustering_method == ClusteringMethod::KMeans) {
-        clusterControlsDevice(d_Ubi, d_costs_b, Nb, Tb, Ub, clusters_b);
+        clusterControlsDevice(d_Ubi, d_costs_b, Nb, Tb, Ub, clusters_b,
+                              stream_backward);
     } else {
         std::vector<double> hc(Nb), hUi((size_t)Nb * dim_u * Tb);
-        CUDA_CHECK(cudaMemcpy(hc.data(), d_costs_b, Nb * sizeof(double),
-                              cudaMemcpyDeviceToHost));
-        CUDA_CHECK(cudaMemcpy(hUi.data(), d_Ubi,
-                              (size_t)Nb * dim_u * Tb * sizeof(double),
-                              cudaMemcpyDeviceToHost));
+        CUDA_CHECK(cudaMemcpyAsync(hc.data(), d_costs_b, Nb * sizeof(double),
+                                   cudaMemcpyDeviceToHost, stream_backward));
+        CUDA_CHECK(cudaMemcpyAsync(hUi.data(), d_Ubi,
+                                   (size_t)Nb * dim_u * Tb * sizeof(double),
+                                   cudaMemcpyDeviceToHost, stream_backward));
+        CUDA_CHECK(cudaStreamSynchronize(stream_backward));
         Eigen::VectorXd costs_b = Eigen::Map<Eigen::VectorXd>(hc.data(), Nb);
         Eigen::MatrixXd Ui_b = flat_Ui_to_eigen(hUi, Nb, dim_u, Tb);
         dbscan(clusters_b, Ui_b, costs_b, Nb);
@@ -780,7 +843,10 @@ void BiMPPI_GPU::backwardRollout() {
             Xb.block(ci*dim_x,t,dim_x,1)=Xb.block(ci*dim_x,t+1,dim_x,1)-(double)dt*f(Xb.block(ci*dim_x,t+1,dim_x,1), u_val);
         }
     }
-    elapsed_clustering+=std::chrono::duration<double>(std::chrono::high_resolution_clock::now()-t1).count();
+    {
+        std::lock_guard<std::mutex> lock(branch_state_mutex);
+        elapsed_clustering+=std::chrono::duration<double>(std::chrono::high_resolution_clock::now()-t1).count();
+    }
 }
 
 // ── selectConnection ──────────────────────────────────────────────
@@ -888,7 +954,7 @@ void BiMPPI_GPU::guideMPPI() {
         }
         cost+=p(Xi.col(Tr), x_target);
         for(int t=0;t<Tr+1;++t){
-            if(collision_checker->getCollisionGrid(Xi.col(t))){
+            if(collision_checker && collision_checker->getCollisionGrid(Xi.col(t))){
                 cost=1e8;
                 break;
             }
@@ -904,7 +970,7 @@ void BiMPPI_GPU::guideMPPI() {
             bool feasible=true;
             double ref_cost=0.0;
             for(int t=0;t<Xc[r].cols();++t){
-                if(collision_checker->getCollisionGrid(Xc[r].col(t))){
+                if(collision_checker && collision_checker->getCollisionGrid(Xc[r].col(t))){
                     feasible=false;
                     break;
                 }
@@ -917,10 +983,12 @@ void BiMPPI_GPU::guideMPPI() {
         }
         if(best_ref_idx>=0){
             Uo=Uc[best_ref_idx]; Xo=Xc[best_ref_idx]; u0=Uo.col(0);
+            U_b0=Ub.block(joints[best_ref_idx][1]*dim_u,0,dim_u,Tb);
             return;
         }
     }
     Uo=Ur[idx]; Xo=Xr[idx]; u0=Uo.col(0);
+    U_b0=Ub.block(joints[idx][1]*dim_u,0,dim_u,Tb);
 }
 
 void BiMPPI_GPU::guideReference(const Eigen::MatrixXd &Uref,
@@ -1018,22 +1086,34 @@ void BiMPPI_GPU::guideReference(const Eigen::MatrixXd &Uref,
 
 void BiMPPI_GPU::partitioningControl() {
     U_f0=Uo.leftCols(Tf);
-    U_b0=Eigen::MatrixXd::Zero(dim_u,Tb);
+    if (U_b0.rows() != dim_u || U_b0.cols() != Tb)
+        U_b0=Eigen::MatrixXd::Zero(dim_u,Tb);
 }
 
 double BiMPPI_GPU::evaluateTrajectoryCost(
-    const Eigen::MatrixXd &trajectory) const {
-    if (trajectory.rows() != dim_x || trajectory.cols() == 0 || !p) {
+    const Eigen::MatrixXd &trajectory,
+    const Eigen::MatrixXd &controls) const {
+    if (trajectory.rows() != dim_x || controls.rows() != dim_u ||
+        trajectory.cols() != controls.cols() + 1 || !p) {
         return std::numeric_limits<double>::quiet_NaN();
     }
 
     double value = 0.0;
-    for (int t = 0; t < trajectory.cols(); ++t) {
-        value += p(trajectory.col(t), x_target);
-        if (collision_checker && collision_checker->getCollisionGrid(trajectory.col(t))) {
+    for (int t = 0; t < controls.cols(); ++t) {
+        if (collision_checker &&
+            collision_checker->getCollisionGrid(trajectory.col(t))) {
             return 1e8;
         }
+        if (model_type == LEGACY_CUDA_MANIPULATOR && q) {
+            value += dt * q(trajectory.col(t), controls.col(t));
+        }
+        value += p(trajectory.col(t), x_target);
     }
+    if (collision_checker &&
+        collision_checker->getCollisionGrid(trajectory.col(controls.cols()))) {
+        return 1e8;
+    }
+    value += p(trajectory.col(controls.cols()), x_target);
     return value;
 }
 
@@ -1041,7 +1121,18 @@ void BiMPPI_GPU::solve() {
     elapsed_rollout=elapsed_clustering=0.0;
     vis_rollout_samples.clear();
     start=std::chrono::high_resolution_clock::now();
-    backwardRollout(); forwardRollout();
+    CUDA_CHECK(cudaMemcpy(d_x_init, x_init.data(), dim_x * sizeof(double),
+                          cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_x_target, x_target.data(), dim_x * sizeof(double),
+                          cudaMemcpyHostToDevice));
+    auto backward_future = std::async(std::launch::async, [this] {
+        backwardRollout();
+    });
+    auto forward_future = std::async(std::launch::async, [this] {
+        forwardRollout();
+    });
+    backward_future.get();
+    forward_future.get();
     auto t2=std::chrono::high_resolution_clock::now();
     selectConnection(); concatenate();
     auto t3=std::chrono::high_resolution_clock::now();
@@ -1052,7 +1143,7 @@ void BiMPPI_GPU::solve() {
     elapsed_1=t4-start;
     partitioningControl();
     elapsed=elapsed_rollout+elapsed_clustering+elapsed_connection+elapsed_guide;
-    cost = evaluateTrajectoryCost(Xo);
+    cost = evaluateTrajectoryCost(Xo, Uo);
 
     // ── Visualization data export ──
     if (vis_logger && vis_logger->enabled) {

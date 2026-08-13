@@ -20,9 +20,14 @@ public:
     std::vector<std::array<double, 4>> circles;
     // x1, x2, y1, y2
     std::vector<std::array<double, 4>> rectangles;
+    // xmin, xmax, ymin, ymax, zmin, zmax (3D Workspace AABB boxes)
+    std::vector<std::array<double, 6>> workspace_boxes;
 
     void addCircle(double x, double y, double r);
     void addRectangle(double x, double y, double w, double h);
+    void addWorkspaceBoxMinMax(double xmin, double xmax, double ymin, double ymax, double zmin, double zmax) {
+        workspace_boxes.push_back({xmin, xmax, ymin, ymax, zmin, zmax});
+    }
 
     bool getCollisionGrid(const Eigen::VectorXd &x);
     bool getCollisionCircle(const Eigen::VectorXd &z);

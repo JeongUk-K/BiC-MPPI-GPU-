@@ -28,6 +28,7 @@ enum class GpuAblationVariant {
   LogMPPI,
   ClusterMPPI,
   BiCNoGuide,
+  BiCNoGuideDBSCAN,
   BiCNoBackward,
   BiCNoClustering,
   FullBiC
@@ -45,7 +46,10 @@ struct GpuAblationConfig {
   int T = 100;
   int Tf = 50;
   int Tb = 50;
-  int raw_connection_candidates = 64;
+  int raw_connection_candidates = 8;
+  int kmeans_clusters = 5;
+  int kmeans_max_iterations = 100;
+  double kmeans_threshold = 1e-6;
   double dt = 0.1;
   double gamma_u = 10.0;
   double sigma_v = 0.6;
@@ -141,7 +145,9 @@ inline std::string gpuVariantFileToken(GpuAblationVariant variant) {
   case GpuAblationVariant::ClusterMPPI:
     return "cluster_mppi";
   case GpuAblationVariant::BiCNoGuide:
-    return "bic_without_guide";
+    return "bic_without_guide_kmeans";
+  case GpuAblationVariant::BiCNoGuideDBSCAN:
+    return "bic_without_guide_dbscan";
   case GpuAblationVariant::BiCNoBackward:
     return "bic_without_backward";
   case GpuAblationVariant::BiCNoClustering:
@@ -159,15 +165,17 @@ inline std::string gpuVariantLabel(GpuAblationVariant variant) {
   case GpuAblationVariant::LogMPPI:
     return "Log-MPPI";
   case GpuAblationVariant::ClusterMPPI:
-    return "Cluster-MPPI";
+    return "Cluster-MPPI-DB";
   case GpuAblationVariant::BiCNoGuide:
-    return "BiC without Guide";
+    return "BiC-MPPI-KM w/o Guide";
+  case GpuAblationVariant::BiCNoGuideDBSCAN:
+    return "BiC-MPPI-DB w/o Guide";
   case GpuAblationVariant::BiCNoBackward:
     return "BiC without Backward";
   case GpuAblationVariant::BiCNoClustering:
-    return "BiC without Clustering";
+    return "BiC-MPPI w/o Cluster";
   case GpuAblationVariant::FullBiC:
-    return "Full BiC-MPPI";
+    return "Full BiC-MPPI-KM";
   }
   return "Unknown";
 }
@@ -239,6 +247,12 @@ inline void parseGpuAblationArgs(int argc, char **argv,
       config.Tb = std::stoi(require_value(key));
     } else if (key == "--raw-candidates") {
       config.raw_connection_candidates = std::stoi(require_value(key));
+    } else if (key == "--kmeans-clusters") {
+      config.kmeans_clusters = std::stoi(require_value(key));
+    } else if (key == "--kmeans-iters") {
+      config.kmeans_max_iterations = std::stoi(require_value(key));
+    } else if (key == "--kmeans-threshold") {
+      config.kmeans_threshold = std::stod(require_value(key));
     } else if (key == "--sigma-v") {
       config.sigma_v = std::stod(require_value(key));
     } else if (key == "--sigma-w") {
@@ -258,10 +272,15 @@ inline void parseGpuAblationArgs(int argc, char **argv,
       config.Nf = 256;
       config.Nb = 256;
       config.Nr = 128;
-      config.raw_connection_candidates = 24;
+      config.raw_connection_candidates = 8;
     } else {
       throw std::runtime_error("Unknown argument: " + key);
     }
+  }
+  if (config.raw_connection_candidates <= 0 || config.kmeans_clusters <= 0 ||
+      config.kmeans_max_iterations <= 0 || config.kmeans_threshold < 0.0) {
+    throw std::runtime_error(
+        "raw candidate and K-means parameters must be positive");
   }
 }
 
@@ -366,10 +385,8 @@ inline void GpuBiMPPIAblationSolver::chooseBestConnectedCandidate() {
   int best = 0;
   double best_cost = std::numeric_limits<double>::infinity();
   for (int i = 0; i < static_cast<int>(Xc.size()); ++i) {
-    if (!trajectoryFeasible(Xc[i])) {
-      continue;
-    }
-    const double cost = trajectoryCost(Xc[i]);
+    const double cost =
+        trajectoryFeasible(Xc[i]) ? trajectoryCost(Xc[i]) : 1e8;
     if (cost < best_cost) {
       best_cost = cost;
       best = i;
@@ -428,6 +445,10 @@ inline std::vector<int> GpuBiMPPIAblationSolver::topFeasibleIndices(
 inline void GpuBiMPPIAblationSolver::solveNoGuide() {
   elapsed_rollout = elapsed_clustering = 0.0;
   const auto t0 = std::chrono::high_resolution_clock::now();
+  CUDA_CHECK(cudaMemcpy(d_x_init, x_init.data(), dim_x * sizeof(double),
+                        cudaMemcpyHostToDevice));
+  CUDA_CHECK(cudaMemcpy(d_x_target, x_target.data(), dim_x * sizeof(double),
+                        cudaMemcpyHostToDevice));
   backwardRollout();
   forwardRollout();
   const auto t1 = std::chrono::high_resolution_clock::now();
@@ -550,7 +571,7 @@ inline void GpuBiMPPIAblationSolver::solveNoClustering(
   const auto t2 = std::chrono::high_resolution_clock::now();
   elapsed_clustering = 0.0;
   elapsed_connection = std::chrono::duration<double>(t2 - t1).count();
-  guideMPPI();
+  guideReference(Uo, Xo);
   const auto t3 = std::chrono::high_resolution_clock::now();
   elapsed_guide = std::chrono::duration<double>(t3 - t2).count();
   last_connection_distance = best_connection;
@@ -585,6 +606,7 @@ inline void GpuBiMPPIAblationSolver::solveVariant(
     GpuAblationVariant variant, const GpuAblationConfig &config) {
   switch (variant) {
   case GpuAblationVariant::BiCNoGuide:
+  case GpuAblationVariant::BiCNoGuideDBSCAN:
     solveNoGuide();
     break;
   case GpuAblationVariant::BiCNoBackward:
@@ -616,7 +638,8 @@ inline MPPIParam makeGpuMppiParam(const GpuAblationConfig &config,
   return param;
 }
 
-inline BiMPPIParam makeGpuBiParam(const GpuAblationConfig &config,
+inline BiMPPIParam makeGpuBiParam(GpuAblationVariant variant,
+                                  const GpuAblationConfig &config,
                                   const Eigen::VectorXd &x_init,
                                   const Eigen::VectorXd &x_target) {
   BiMPPIParam param;
@@ -635,6 +658,12 @@ inline BiMPPIParam makeGpuBiParam(const GpuAblationConfig &config,
   param.minpts = config.minpts;
   param.epsilon = config.epsilon;
   param.psi = 0.6;
+  param.clustering_method = variant == GpuAblationVariant::BiCNoGuideDBSCAN
+                                ? ClusteringMethod::DBSCAN
+                                : ClusteringMethod::KMeans;
+  param.kmeans_clusters = config.kmeans_clusters;
+  param.kmeans_max_iterations = config.kmeans_max_iterations;
+  param.kmeans_threshold = config.kmeans_threshold;
   return param;
 }
 
@@ -924,11 +953,14 @@ runGpuAblationVariant(GpuAblationVariant variant,
                                          target, config, start_case, map_id);
       } else {
         GpuBiMPPIAblationSolver solver(model);
-        auto param = makeGpuBiParam(config, start, target);
+        auto param = makeGpuBiParam(variant, config, start, target);
         solver.U_f0 = Eigen::MatrixXd::Zero(model.dim_u, param.Tf);
         solver.U_b0 = Eigen::MatrixXd::Zero(model.dim_u, param.Tb);
         solver.init(param);
         solver.setSeed(run_seed);
+        solver.setConnectionMetric(
+            GpuBiMPPIAblationSolver::ConnectionMetric::SE2);
+        solver.setSE2ConnectionWeights(1.0, 1.0);
         solver.setCollisionChecker(&collision_checker);
         row = runGpuBiSolver(variant, solver, collision_checker, target, config,
                              start_case, map_id);

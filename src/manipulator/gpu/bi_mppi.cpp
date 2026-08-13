@@ -1,14 +1,12 @@
-#include "bi_mppi_gpu.cuh"
-#include "collision_checker.h"
-#include "manipulator_dynamics_model.h"
-#include "mppi_param.h"
+// Manipulator BiC-MPPI — uses the generic cuda-accel BiMPPI_GPU solver
+#include "manipulator_model.h"
+#include <bi_mppi_gpu.cuh>
 
 #include <Eigen/Dense>
-#include <chrono>
 #include <iostream>
 
 int main() {
-  ManipulatorDynamicsModel model;
+  ManipulatorModel model;
   model.w_tau = 1.0e-3;
   model.w_qdot = 2.0e-2;
   model.w_joint_limit = 20.0;
@@ -20,7 +18,6 @@ int main() {
   model.link_radius = 0.045;
   model.obs_safe_margin = 0.10;
   model.hard_collision_margin = 0.02;
-
   model.addWorkspaceBoxMinMax(0.3, 0.5, -0.1, 0.1, 0.1, 0.4);
 
   BiMPPIParam param;
@@ -31,28 +28,18 @@ int main() {
   param.Nb = 4096;
   param.Nr = 4096;
   param.gamma_u = 0.0015;
-  param.x_init = Eigen::VectorXd::Zero(ManipulatorDynamicsModel::kDof * 2);
+  param.clustering_method = ClusteringMethod::KMeans;
+  param.x_init = Eigen::VectorXd::Zero(ManipulatorModel::kDof * 2);
   param.x_init << 0.0, 0.5, -0.5, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0;
-  param.x_target = Eigen::VectorXd::Zero(ManipulatorDynamicsModel::kDof * 2);
+  param.x_target = Eigen::VectorXd::Zero(ManipulatorModel::kDof * 2);
   param.x_target << 0.5, -0.2, 0.3, 0.2, 0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0;
 
-  Eigen::VectorXd sigma_u(ManipulatorDynamicsModel::kDof);
+  Eigen::VectorXd sigma_u(ManipulatorModel::kDof);
   sigma_u << 4.5, 4.5, 3.8, 2.2, 1.8, 1.2;
   param.sigma_u = sigma_u.asDiagonal();
-  param.clustering_method = ClusteringMethod::KMeans;
-
-  CollisionChecker cc;
-  cc.resolution = 0.05;
-  cc.link_radius = model.link_radius;
-  cc.workspace_safe_margin = model.obs_safe_margin;
-  cc.workspace_hard_margin = model.hard_collision_margin;
-  cc.use_workspace_link_collision = true;
-  cc.addWorkspaceBoxMinMax(0.3, 0.5, -0.1, 0.1, 0.1, 0.4);
 
   BiMPPI_GPU solver(model);
-  solver.setClusteringMethod(ClusteringMethod::KMeans);
   solver.init(param);
-  solver.setCollisionChecker(&cc);
 
   std::cout << "[Manipulator BiC-MPPI] Initialized solver successfully.\n";
   for (int iter = 0; iter < 200; ++iter) {
@@ -60,10 +47,9 @@ int main() {
     solver.move();
     const double q_err =
         (solver.x_init.head(6) - param.x_target.head(6)).norm();
-    if (iter % 20 == 0) {
+    if (iter % 20 == 0)
       std::cout << "Iter " << iter << " | q_error: " << q_err
-                << " | step elapsed: " << solver.elapsed << " s\n";
-    }
+                << " | elapsed: " << solver.elapsed << " s\n";
     if (q_err < 0.03) {
       std::cout << "Target reached at iteration " << iter << "!\n";
       break;

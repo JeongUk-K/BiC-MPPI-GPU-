@@ -1,6 +1,4 @@
 #pragma once
-#ifndef CUDA_UTILS_CUH
-#define CUDA_UTILS_CUH
 
 #include <cmath>
 #include <cstdio>
@@ -26,8 +24,8 @@
   do {                                                                         \
     curandStatus_t _err = (call);                                              \
     if (_err != CURAND_STATUS_SUCCESS) {                                       \
-      fprintf(stderr, "cuRAND error at %s:%d  code=%d (%s)\n", __FILE__, __LINE__,  \
-              (int)_err, #call);                                               \
+      fprintf(stderr, "cuRAND error at %s:%d  code=%d\n", __FILE__, __LINE__,  \
+              (int)_err);                                                      \
       exit(EXIT_FAILURE);                                                      \
     }                                                                          \
   } while (0)
@@ -155,5 +153,3 @@ __device__ __forceinline__ double warp_reduce_sum(double val) {
   }
 
 #endif // __CUDACC__
-
-#endif // CUDA_UTILS_CUH

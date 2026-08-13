@@ -119,19 +119,12 @@ template <typename ModelClass> MPPI_GPU::MPPI_GPU(ModelClass model) {
   model_type =
       legacy_cuda_model_type_from_name(typeid(ModelClass).name(), dim_x, dim_u);
 
-  d_U0 = d_Ui = d_noise = d_costs = d_Uo = d_Di = nullptr;
-  d_x_init = d_x_target = d_sigma = nullptr;
-  d_map = d_circles = d_rects = d_ws_boxes = nullptr;
-  n_circles = n_rects = n_ws_boxes = 0;
-  with_map = false;
-  collision_checker = nullptr;
-  curand_gen = nullptr;
+  CURAND_CHECK(curandCreateGenerator(&curand_gen, CURAND_RNG_PSEUDO_DEFAULT));
+  CURAND_CHECK(curandSetPseudoRandomGeneratorSeed(
+      curand_gen, static_cast<unsigned long long>(std::time(nullptr))));
 }
 
 inline void MPPI_GPU::setSeed(std::uint_fast64_t seed) {
-  if (!curand_gen) {
-    CURAND_CHECK(curandCreateGenerator(&curand_gen, CURAND_RNG_PSEUDO_PHILOX4_32_10));
-  }
   CURAND_CHECK(curandSetPseudoRandomGeneratorSeed(
       curand_gen, static_cast<unsigned long long>(seed)));
 }

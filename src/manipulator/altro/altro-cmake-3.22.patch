@@ -1,0 +1,94 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 59fbe02..ae09c3a 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -1,7 +1,7 @@
+ # Used 3.23 features
+ # - PROJECT_IS_TOP_LEVEL (3.21)
+ # - FILE_SETS (3.23)
+-cmake_minimum_required(VERSION 3.23)
++cmake_minimum_required(VERSION 3.22)
+ list(APPEND CMAKE_MESSAGE_CONTEXT altro)
+ project(altro VERSION 0.1.0)
+ 
+@@ -124,6 +124,9 @@ FetchContent_Declare(altrocpp
+   GIT_TAG 6929ac51e29a76b5329273bfff6d1f749250b19e
+ )
+ FetchContent_MakeAvailable(altrocpp)
++if (TARGET altro AND NOT TARGET altrocpp::altro)
++  add_library(altrocpp::altro ALIAS altro)
++endif()
+ list(POP_BACK CMAKE_MESSAGE_CONTEXT)
+ 
+ #############################################
+@@ -156,4 +159,3 @@ endif()
+ #############################################
+ # Installation
+ #############################################
+-add_subdirectory(install)
+\ No newline at end of file
+diff --git a/src/altrocpp_interface/CMakeLists.txt b/src/altrocpp_interface/CMakeLists.txt
+index f8766bd..309649e 100644
+--- a/src/altrocpp_interface/CMakeLists.txt
++++ b/src/altrocpp_interface/CMakeLists.txt
+@@ -17,4 +17,6 @@ target_include_directories(altrocpp_interface
+ 
+ add_library(altrocpp::interface ALIAS altrocpp_interface)
+ 
+-add_subdirectory(test)
+\ No newline at end of file
++if (ALTRO_BUILD_TESTS)
++  add_subdirectory(test)
++endif()
+diff --git a/install/CMakeLists.txt b/install/CMakeLists.txt
+index eb7efdb..dd7ec43 100644
+--- a/install/CMakeLists.txt
++++ b/install/CMakeLists.txt
+@@ -20,7 +20,6 @@ install(TARGETS altro_altro2
+   INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+   LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+   ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+-  FILE_SET HEADERS DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+   COMPONENT AltroRuntime
+ )
+ if (NOT BUILD_SHARED_LIBS)
+diff --git a/src/altro/CMakeLists.txt b/src/altro/CMakeLists.txt
+index e855795..f63c312 100644
+--- a/src/altro/CMakeLists.txt
++++ b/src/altro/CMakeLists.txt
+@@ -22,14 +22,3 @@ target_include_directories(altro_altro2
+ set_target_properties(altro_altro2 PROPERTIES EXPORT_NAME altro)
+ add_library(altro::altro ALIAS altro_altro2)
+ 
+-
+-target_sources(altro_altro2
+-  PUBLIC FILE_SET HEADERS
+-  BASE_DIRS ..
+-  FILES
+-  altro.hpp
+-  altro_solver.hpp
+-  solver/solver_options.hpp
+-  solver/exceptions.hpp
+-  solver/typedefs.hpp
+-)
+\ No newline at end of file
+diff --git a/src/altro/altro_solver.cpp b/src/altro/altro_solver.cpp
+index 4d2de7c..ff3eaaf 100644
+--- a/src/altro/altro_solver.cpp
++++ b/src/altro/altro_solver.cpp
+@@ -160,13 +160,13 @@ ErrorCodes ALTROSolver::SetConstraint(ConstraintFunction constraint_function,
+                                            label_k);
+       solver_->problem_.SetConstraint(
+           std::make_shared<cpp_interface::EqualityConstraint>(std::move(eq)), k);
+-      ncon = solver_->problem_.GetNumEqualityConstraints(k);
++      ncon = static_cast<int>(solver_->problem_.GetEqualityConstraints().at(k).size());
+     } else if (constraint_type == ConstraintType::INEQUALITY) {
+       cpp_interface::InequalityConstraint ineq(n, m, dim, constraint_function, constraint_jacobian,
+                                                label_k);
+       solver_->problem_.SetConstraint(
+           std::make_shared<cpp_interface::InequalityConstraint>(std::move(ineq)), k);
+-      ncon = solver_->problem_.GetNumInequalityConstraints(k);
++      ncon = static_cast<int>(solver_->problem_.GetInequalityConstraints().at(k).size());
+     }
+ 
+     // Set index

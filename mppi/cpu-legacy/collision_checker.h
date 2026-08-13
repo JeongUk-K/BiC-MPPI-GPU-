@@ -1,4 +1,6 @@
 #pragma once
+#ifndef COLLISION_CHECKER_H
+#define COLLISION_CHECKER_H
 
 #include "model_base.h"
 
@@ -22,10 +24,30 @@ public:
   std::vector<std::array<double, 4>> rectangles;
   // cx, cy, r, r^2, z_min, z_max  (3D vertical cylinder)
   std::vector<std::array<double, 6>> cylinders_3d;
+  // xmin, xmax, ymin, ymax, zmin, zmax (3D Workspace AABB boxes)
+  std::vector<std::array<double, 6>> workspace_boxes;
+
+  // Manipulator workspace metadata consumed by the shared cuda-accel path.
+  double link_radius = 0.045;
+  double workspace_safe_margin = 0.10;
+  double workspace_hard_margin = 0.0;
+  bool use_workspace_link_collision = true;
+
+  void clear() {
+    map.clear();
+    circles.clear();
+    rectangles.clear();
+    cylinders_3d.clear();
+    workspace_boxes.clear();
+    with_map = false;
+  }
 
   void addCircle(double x, double y, double r);
   void addRectangle(double x, double y, double w, double h);
   void addCylinder(double cx, double cy, double r, double z_min, double z_max);
+  void addWorkspaceBoxMinMax(double xmin, double xmax, double ymin, double ymax, double zmin, double zmax) {
+    workspace_boxes.push_back({xmin, xmax, ymin, ymax, zmin, zmax});
+  }
 
   bool getCollisionGrid(const Eigen::VectorXd &x);
   bool getCollisionCircle(const Eigen::VectorXd &z);
@@ -245,3 +267,5 @@ inline bool CollisionChecker::getCollisionCircle_map(const Eigen::VectorXd &z) {
   }
   return false;
 }
+
+#endif

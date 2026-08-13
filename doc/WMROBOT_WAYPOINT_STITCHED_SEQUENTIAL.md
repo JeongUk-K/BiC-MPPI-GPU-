@@ -136,7 +136,7 @@ waypoint 5 도달 → 성공
 | Solver | Waypoint target | rollout 처리의 핵심 |
 |---|---|---|
 | MPPI | 다음 waypoint 하나 | 전체 rollout을 비용 기반으로 가중 결합 |
-| Log-MPPI | 다음 waypoint 하나 | Log-MPPI 방식으로 sampling weight 계산 |
+| Log-MPPI | 다음 waypoint 하나 | MPPI와 같은 Gaussian rollout을 사용하고 log-sum-exp로 sampling weight 정규화 |
 | Cluster-MPPI | 다음 waypoint 하나 | rollout을 군집화하고 cluster 대표 제어열 선택 |
 
 Waypoint 처리 로직은 `runMppiLikeScenario()`에 공통으로 구현되어 있다.

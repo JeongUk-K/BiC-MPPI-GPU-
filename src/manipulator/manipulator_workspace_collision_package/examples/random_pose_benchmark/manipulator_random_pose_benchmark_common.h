@@ -8,11 +8,11 @@
 
 #include <Eigen/Dense>
 
-#include <algorithm>
 #include <array>
+#include <algorithm>
 #include <chrono>
-#include <cstdint>
 #include <cstdlib>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
@@ -34,10 +34,10 @@ struct RandomPoseBenchmarkSolverParams {
   struct Solver {
     float dt = 0.02f;
     int forward_horizon = 90;
-    int forward_samples = 4096;
+    int forward_samples = 1024;
     int backward_horizon = 90;
-    int backward_samples = 4096;
-    int reverse_samples = 4096;
+    int backward_samples = 1024;
+    int reverse_samples = 1024;
     double gamma_u = 0.0015;
     JointNoiseSigma sigma = {4.5, 4.5, 3.8, 2.2, 1.8, 1.2};
     ClusteringMethod clustering_method = ClusteringMethod::DBSCAN;
@@ -70,7 +70,7 @@ inline RandomPoseBenchmarkSolverParams randomPoseSolverParams() {
 
   params.mppi.dt = 0.02f;
   params.mppi.forward_horizon = 90;
-  params.mppi.forward_samples = 4096;
+  params.mppi.forward_samples = 1024;
   params.mppi.gamma_u = 0.0015;
   params.mppi.sigma = {4.5, 4.5, 3.8, 2.2, 1.8, 1.2};
 
@@ -80,14 +80,18 @@ inline RandomPoseBenchmarkSolverParams randomPoseSolverParams() {
   params.clustermppi.cluster_deviation_mu = 1.0;
   params.clustermppi.cluster_epsilon = 3.8;
   params.clustermppi.cluster_minpts = 8;
-  params.clustermppi.clustering_method = ClusteringMethod::KMeans;
+  params.clustermppi.clustering_method = ClusteringMethod::DBSCAN;
+
+  params.clustermppi.kmeans_clusters = 2;
+  params.clustermppi.kmeans_max_iterations = 100;
+  params.clustermppi.kmeans_threshold = 1e-6;
 
   params.bicmppi.dt = 0.02f;
   params.bicmppi.forward_horizon = 45;
   params.bicmppi.backward_horizon = 45;
-  params.bicmppi.forward_samples = 4096;
-  params.bicmppi.backward_samples = 4096;
-  params.bicmppi.reverse_samples = 4096;
+  params.bicmppi.forward_samples = 1024;
+  params.bicmppi.backward_samples = 1024;
+  params.bicmppi.reverse_samples = 1024;
   params.bicmppi.gamma_u = 0.0015;
   params.bicmppi.sigma = {4.5, 4.5, 3.8, 2.2, 1.8, 1.2};
   params.bicmppi.bic_deviation_mu = 1.0;
@@ -96,13 +100,16 @@ inline RandomPoseBenchmarkSolverParams randomPoseSolverParams() {
   params.bicmppi.bic_minpts = 8;
   params.bicmppi.bic_psi = 0.0;
   params.bicmppi.clustering_method = ClusteringMethod::KMeans;
+  params.bicmppi.kmeans_clusters = 2;
+  params.bicmppi.kmeans_max_iterations = 100;
+  params.bicmppi.kmeans_threshold = 1e-6;
 
   return params;
 }
 
 struct BenchmarkConfig {
   static constexpr int kReferencePoseCount = 16;
-  int scenario_count = kReferencePoseCount * (kReferencePoseCount - 1);
+  int scenario_count = manipulator_pose_set::kFeasiblePosePairCount;
   std::uint_fast64_t rollout_seed_base = 260800ULL;
   double max_pair_q_distance = std::numeric_limits<double>::infinity();
   double min_pair_ee_distance = 0.0;
@@ -112,7 +119,7 @@ struct BenchmarkConfig {
   double obstacle_half_z = 0.055;
   double obstacle_min_z = 0.05;
 
-  int max_iter = 200;
+  int max_iter = 400;
   double q_tol = 0.03;
   double ee_tol = 0.05;
   double qdot_tol = 0.2;
@@ -120,10 +127,9 @@ struct BenchmarkConfig {
   double warm_start_kp = 18.0;
   double warm_start_kd = 7.0;
 
-  std::string output_root = "result/manipulator";
+  std::string output_root = "../result/manipulator";
   bool save_rollout_ee = true;
   bool save_rollout_state = true;
-  // Run all generated scenarios by default.
   std::vector<int> selected_scenario_ids;
 };
 
@@ -145,13 +151,13 @@ inline BenchmarkConfig benchmarkConfigFromEnvironment() {
   if (const char *value = std::getenv("MANIPULATOR_BENCHMARK_SAVE_STATE")) {
     config.save_rollout_state = std::string(value) != "0";
   }
-  if (const char *value = std::getenv("MANIPULATOR_BENCHMARK_SCENARIO_IDS")) {
+  if (const char *value =
+          std::getenv("MANIPULATOR_BENCHMARK_SCENARIO_IDS")) {
     config.selected_scenario_ids.clear();
     std::stringstream stream(value);
     std::string token;
     while (std::getline(stream, token, ',')) {
-      if (!token.empty())
-        config.selected_scenario_ids.push_back(std::stoi(token));
+      if (!token.empty()) config.selected_scenario_ids.push_back(std::stoi(token));
     }
     std::sort(config.selected_scenario_ids.begin(),
               config.selected_scenario_ids.end());
@@ -162,8 +168,7 @@ inline BenchmarkConfig benchmarkConfigFromEnvironment() {
     }
   }
   if (config.scenario_count <= 0 ||
-      config.scenario_count > BenchmarkConfig::kReferencePoseCount *
-                                  (BenchmarkConfig::kReferencePoseCount - 1)) {
+      config.scenario_count > manipulator_pose_set::kFeasiblePosePairCount) {
     throw std::runtime_error("invalid MANIPULATOR_BENCHMARK_SCENARIOS");
   }
   if (config.max_iter <= 0) {
@@ -214,14 +219,6 @@ struct BenchmarkResult {
   double max_pair_q_distance = 0.0;
   double total_solver_elapsed = 0.0;
   double mean_solver_elapsed = 0.0;
-  double total_rollout_elapsed = 0.0;
-  double mean_rollout_elapsed = 0.0;
-  double total_clustering_elapsed = 0.0;
-  double mean_clustering_elapsed = 0.0;
-  double total_connection_elapsed = 0.0;
-  double mean_connection_elapsed = 0.0;
-  double total_guide_elapsed = 0.0;
-  double mean_guide_elapsed = 0.0;
   double wall_elapsed = 0.0;
   double final_q_error = 0.0;
   double final_ee_error = 0.0;
@@ -261,6 +258,13 @@ inline std::filesystem::path trajectoryPath(const BenchmarkConfig &config,
          (scenarioTag(scenario_index) + "_executed_x.csv");
 }
 
+inline std::filesystem::path predictedCostPath(const BenchmarkConfig &config,
+                                               const std::string &solver_key,
+                                               int scenario_index) {
+  return rootPath(config) / "predicted_cost" / solver_key /
+         (scenarioTag(scenario_index) + "_predicted_cost.csv");
+}
+
 inline std::filesystem::path rolloutEEPath(const BenchmarkConfig &config,
                                            const std::string &solver_key,
                                            int scenario_index) {
@@ -282,15 +286,15 @@ inline std::filesystem::path rolloutStatePath(const BenchmarkConfig &config,
          (scenarioTag(scenario_index) + "_state_f16.bin.zst");
 }
 
-inline std::filesystem::path
-rolloutStateIndexPath(const BenchmarkConfig &config,
-                      const std::string &solver_key, int scenario_index) {
+inline std::filesystem::path rolloutStateIndexPath(
+    const BenchmarkConfig &config, const std::string &solver_key,
+    int scenario_index) {
   return rootPath(config) / "rollout_state" / solver_key /
          (scenarioTag(scenario_index) + "_index.csv");
 }
 
 class RolloutEEWriter {
-public:
+ public:
   RolloutEEWriter(const std::filesystem::path &data_path,
                   const std::filesystem::path &index_path)
       : data_(data_path, std::ios::binary), index_(index_path) {
@@ -298,8 +302,7 @@ public:
       throw std::runtime_error("failed to open rollout EE output files");
     }
     context_ = ZSTD_createCCtx();
-    if (!context_)
-      throw std::runtime_error("failed to create Zstd context");
+    if (!context_) throw std::runtime_error("failed to create Zstd context");
     checkZstd(ZSTD_CCtx_setParameter(context_, ZSTD_c_compressionLevel, 3));
     checkZstd(ZSTD_CCtx_setParameter(context_, ZSTD_c_checksumFlag, 1));
     output_buffer_.resize(ZSTD_CStreamOutSize());
@@ -327,28 +330,28 @@ public:
   }
 
   void append(const std::string &branch,
-              const std::vector<std::uint8_t> &positions, int rollout_count,
-              int point_count) {
+              const std::vector<std::uint8_t> &positions,
+              int rollout_count, int point_count) {
     const std::size_t byte_count = positions.size();
     index_ << iteration_ << ',' << batch_++ << ',' << branch << ','
            << rollout_count << ',' << point_count
            << ",mixed-i16-i8,0.001,delta-packed-rollout-time-xyz,"
-           << uncompressed_offset_ << ',' << byte_count << '\n';
+           << uncompressed_offset_ << ','
+           << byte_count << '\n';
 
     ZSTD_inBuffer input{positions.data(), byte_count, 0};
     while (input.pos < input.size) {
       ZSTD_outBuffer output{output_buffer_.data(), output_buffer_.size(), 0};
-      checkZstd(
-          ZSTD_compressStream2(context_, &output, &input, ZSTD_e_continue));
+      checkZstd(ZSTD_compressStream2(context_, &output, &input,
+                                    ZSTD_e_continue));
       data_.write(output_buffer_.data(),
                   static_cast<std::streamsize>(output.pos));
-      if (!data_)
-        throw std::runtime_error("failed to write rollout EE data");
+      if (!data_) throw std::runtime_error("failed to write rollout EE data");
     }
     uncompressed_offset_ += byte_count;
   }
 
-private:
+ private:
   static void checkZstd(std::size_t code) {
     if (ZSTD_isError(code)) {
       throw std::runtime_error(std::string("Zstd error: ") +
@@ -357,8 +360,7 @@ private:
   }
 
   void finish() {
-    if (finished_)
-      return;
+    if (finished_) return;
     ZSTD_inBuffer input{nullptr, 0, 0};
     std::size_t remaining = 1;
     while (remaining != 0) {
@@ -384,7 +386,7 @@ private:
 };
 
 class RolloutStateWriter {
-public:
+ public:
   RolloutStateWriter(const std::filesystem::path &data_path,
                      const std::filesystem::path &index_path)
       : data_(data_path, std::ios::binary), index_(index_path) {
@@ -392,8 +394,7 @@ public:
       throw std::runtime_error("failed to open rollout state output files");
     }
     context_ = ZSTD_createCCtx();
-    if (!context_)
-      throw std::runtime_error("failed to create Zstd context");
+    if (!context_) throw std::runtime_error("failed to create Zstd context");
     index_ << "iteration,batch,branch,rollout_count,point_count,state_dim,"
               "dtype,layout,compressed_offset_bytes,compressed_bytes,"
               "uncompressed_offset_bytes,uncompressed_bytes\n";
@@ -403,8 +404,7 @@ public:
   RolloutStateWriter &operator=(const RolloutStateWriter &) = delete;
 
   ~RolloutStateWriter() {
-    if (context_)
-      ZSTD_freeCCtx(context_);
+    if (context_) ZSTD_freeCCtx(context_);
   }
 
   void setIteration(int iteration) {
@@ -413,8 +413,8 @@ public:
   }
 
   void append(const std::string &branch,
-              const std::vector<std::uint16_t> &states, int rollout_count,
-              int point_count, int state_dim) {
+              const std::vector<std::uint16_t> &states,
+              int rollout_count, int point_count, int state_dim) {
     const std::size_t byte_count = states.size() * sizeof(std::uint16_t);
     output_buffer_.resize(ZSTD_compressBound(byte_count));
     checkZstd(ZSTD_CCtx_setParameter(context_, ZSTD_c_compressionLevel, 3));
@@ -430,13 +430,12 @@ public:
            << byte_count << '\n';
     data_.write(output_buffer_.data(),
                 static_cast<std::streamsize>(compressed_bytes));
-    if (!data_)
-      throw std::runtime_error("failed to write rollout state data");
+    if (!data_) throw std::runtime_error("failed to write rollout state data");
     compressed_offset_ += compressed_bytes;
     uncompressed_offset_ += byte_count;
   }
 
-private:
+ private:
   static void checkZstd(std::size_t code) {
     if (ZSTD_isError(code)) {
       throw std::runtime_error(std::string("Zstd error: ") +
@@ -462,6 +461,8 @@ inline void ensureOutputDirectories(const BenchmarkConfig &config,
   std::filesystem::create_directories(rootPath(config) / "rollout_ee" /
                                       solver_key);
   std::filesystem::create_directories(rootPath(config) / "rollout_state" /
+                                      solver_key);
+  std::filesystem::create_directories(rootPath(config) / "predicted_cost" /
                                       solver_key);
 }
 
@@ -489,9 +490,9 @@ inline void applyScenarioObstacle(ManipulatorDynamicsModel &model,
                               obstacle.ymax, obstacle.zmin, obstacle.zmax);
 }
 
-inline CollisionChecker
-makeWorkspaceCollisionChecker(const ManipulatorDynamicsModel &model,
-                              const ManipulatorBoxObstacle &obstacle) {
+inline CollisionChecker makeWorkspaceCollisionChecker(
+    const ManipulatorDynamicsModel &model,
+    const ManipulatorBoxObstacle &obstacle) {
   CollisionChecker cc;
   cc.clear();
   cc.resolution = 0.05;
@@ -516,16 +517,17 @@ inline ManipulatorBoxObstacle makeMidPathObstacle(
   obstacle.xmax = center.x() + config.obstacle_half_x;
   obstacle.ymin = center.y() - config.obstacle_half_y;
   obstacle.ymax = center.y() + config.obstacle_half_y;
-  obstacle.zmin =
-      std::max(config.obstacle_min_z, center.z() - config.obstacle_half_z);
-  obstacle.zmax =
-      std::max(obstacle.zmin + 0.02, center.z() + config.obstacle_half_z);
+  obstacle.zmin = std::max(config.obstacle_min_z,
+                           center.z() - config.obstacle_half_z);
+  obstacle.zmax = std::max(obstacle.zmin + 0.02,
+                           center.z() + config.obstacle_half_z);
   return obstacle;
 }
 
 inline Eigen::MatrixXd makeSigmaMatrix(const JointNoiseSigma &sigma_diag) {
-  Eigen::MatrixXd sigma = Eigen::MatrixXd::Zero(ManipulatorDynamicsModel::kDof,
-                                                ManipulatorDynamicsModel::kDof);
+  Eigen::MatrixXd sigma =
+      Eigen::MatrixXd::Zero(ManipulatorDynamicsModel::kDof,
+                            ManipulatorDynamicsModel::kDof);
   for (int i = 0; i < ManipulatorDynamicsModel::kDof; ++i) {
     sigma(i, i) = sigma_diag[static_cast<std::size_t>(i)];
   }
@@ -536,81 +538,74 @@ inline bool directJointPathBlocked(const ManipulatorDynamicsModel &model,
                                    const Eigen::VectorXd &x_init,
                                    const Eigen::VectorXd &x_goal);
 
-inline std::vector<BenchmarkScenario>
-makeBenchmarkScenarios(ManipulatorDynamicsModel &model,
-                       const BenchmarkConfig &config) {
+inline std::vector<BenchmarkScenario> makeBenchmarkScenarios(
+    ManipulatorDynamicsModel &model, const BenchmarkConfig &config) {
   const auto poses = manipulator_pose_set::makeReferencePoseSet16();
   manipulator_pose_set::validatePoseSet(poses);
 
   std::vector<BenchmarkScenario> scenarios;
   scenarios.reserve(static_cast<std::size_t>(config.scenario_count));
 
-  for (std::size_t init_idx = 0; init_idx < poses.size(); ++init_idx) {
-    for (std::size_t goal_idx = 0; goal_idx < poses.size(); ++goal_idx) {
-      if (init_idx == goal_idx) {
-        continue;
-      }
+  for (const auto &[init_idx, goal_idx] :
+       manipulator_pose_set::feasiblePosePairIndices162()) {
+    const auto pair = manipulator_pose_set::makePosePairByIndex(
+        poses, init_idx, goal_idx);
 
-      const auto pair = manipulator_pose_set::makePosePairByIndex(
-          poses, static_cast<int>(init_idx), static_cast<int>(goal_idx));
-
-      const Eigen::VectorXd x_init =
-          manipulator_pose_set::makeStateFromPose(model, pair.init_pose);
-      const Eigen::VectorXd x_goal =
-          manipulator_pose_set::makeStateFromPose(model, pair.goal_pose);
-      const double pair_q_distance =
-          (x_init.head(ManipulatorDynamicsModel::kDof) -
-           x_goal.head(ManipulatorDynamicsModel::kDof))
-              .norm();
-      if (pair_q_distance > config.max_pair_q_distance) {
-        continue;
-      }
-
-      const Eigen::Vector3d init_ee = model.endEffectorPosition(x_init);
-      const Eigen::Vector3d goal_ee = model.endEffectorPosition(x_goal);
-      const double pair_ee_distance = (init_ee - goal_ee).norm();
-      if (pair_ee_distance < config.min_pair_ee_distance) {
-        continue;
-      }
-
-      const ManipulatorBoxObstacle obstacle =
-          makeMidPathObstacle(model, x_init, x_goal, config);
-      applyScenarioObstacle(model, obstacle);
-
-      if (model.inWorkspaceCollision(x_init) ||
-          model.inWorkspaceCollision(x_goal)) {
-        continue;
-      }
-
-      BenchmarkScenario scenario;
-      scenario.index = static_cast<int>(scenarios.size());
-      scenario.rollout_seed = config.rollout_seed_base + scenario.index;
-      scenario.pose_pair = pair;
-      scenario.obstacle = obstacle;
-      scenario.direct_path_blocked =
-          directJointPathBlocked(model, x_init, x_goal);
-      scenarios.push_back(scenario);
+    const Eigen::VectorXd x_init =
+        manipulator_pose_set::makeStateFromPose(model, pair.init_pose);
+    const Eigen::VectorXd x_goal =
+        manipulator_pose_set::makeStateFromPose(model, pair.goal_pose);
+    const double pair_q_distance =
+        (x_init.head(ManipulatorDynamicsModel::kDof) -
+         x_goal.head(ManipulatorDynamicsModel::kDof))
+            .norm();
+    if (pair_q_distance > config.max_pair_q_distance) {
+      continue;
     }
+
+    const Eigen::Vector3d init_ee = model.endEffectorPosition(x_init);
+    const Eigen::Vector3d goal_ee = model.endEffectorPosition(x_goal);
+    const double pair_ee_distance = (init_ee - goal_ee).norm();
+    if (pair_ee_distance < config.min_pair_ee_distance) {
+      continue;
+    }
+
+    const ManipulatorBoxObstacle obstacle =
+        makeMidPathObstacle(model, x_init, x_goal, config);
+    applyScenarioObstacle(model, obstacle);
+    if (model.inWorkspaceCollision(x_init) ||
+        model.inWorkspaceCollision(x_goal)) {
+      throw std::runtime_error("predefined feasible pose pair is in collision");
+    }
+
+    BenchmarkScenario scenario;
+    scenario.index = static_cast<int>(scenarios.size());
+    scenario.rollout_seed = config.rollout_seed_base + scenario.index;
+    scenario.pose_pair = pair;
+    scenario.obstacle = obstacle;
+    scenario.direct_path_blocked =
+        directJointPathBlocked(model, x_init, x_goal);
+    scenarios.push_back(scenario);
+    if (static_cast<int>(scenarios.size()) == config.scenario_count) break;
   }
 
-  if (scenarios.empty()) {
-    throw std::runtime_error("failed to generate any valid benchmark scenario");
+  if (static_cast<int>(scenarios.size()) != config.scenario_count) {
+    throw std::runtime_error("failed to generate the complete ordered "
+                             "pose-pair benchmark scenario set");
   }
   return scenarios;
 }
 
-inline std::vector<BenchmarkScenario>
-selectBenchmarkScenarios(const std::vector<BenchmarkScenario> &scenarios,
-                         const BenchmarkConfig &config) {
-  if (config.selected_scenario_ids.empty())
-    return scenarios;
+inline std::vector<BenchmarkScenario> selectBenchmarkScenarios(
+    const std::vector<BenchmarkScenario> &scenarios,
+    const BenchmarkConfig &config) {
+  if (config.selected_scenario_ids.empty()) return scenarios;
   std::vector<BenchmarkScenario> selected;
   selected.reserve(config.selected_scenario_ids.size());
   for (int id : config.selected_scenario_ids) {
-    const auto found = std::find_if(scenarios.begin(), scenarios.end(),
-                                    [id](const BenchmarkScenario &scenario) {
-                                      return scenario.index == id;
-                                    });
+    const auto found = std::find_if(
+        scenarios.begin(), scenarios.end(),
+        [id](const BenchmarkScenario &scenario) { return scenario.index == id; });
     if (found == scenarios.end()) {
       throw std::runtime_error("selected benchmark scenario was not generated");
     }
@@ -649,13 +644,13 @@ inline void writeScenarioCsv(const BenchmarkConfig &config,
     const Eigen::Vector3d goal_ee = model.endEffectorPosition(x_goal);
 
     ofs << scenario.index << "," << scenario.rollout_seed << ","
-        << pair.init_idx << "," << pair.goal_idx << "," << pair.init_pose.name
-        << "," << pair.goal_pose.name << "," << init_ee.x() << ","
-        << init_ee.y() << "," << init_ee.z() << "," << goal_ee.x() << ","
-        << goal_ee.y() << "," << goal_ee.z() << "," << scenario.obstacle.xmin
-        << "," << scenario.obstacle.xmax << "," << scenario.obstacle.ymin << ","
-        << scenario.obstacle.ymax << "," << scenario.obstacle.zmin << ","
-        << scenario.obstacle.zmax << ","
+        << pair.init_idx << "," << pair.goal_idx << ","
+        << pair.init_pose.name << "," << pair.goal_pose.name << ","
+        << init_ee.x() << "," << init_ee.y() << "," << init_ee.z() << ","
+        << goal_ee.x() << "," << goal_ee.y() << "," << goal_ee.z() << ","
+        << scenario.obstacle.xmin << "," << scenario.obstacle.xmax << ","
+        << scenario.obstacle.ymin << "," << scenario.obstacle.ymax << ","
+        << scenario.obstacle.zmin << "," << scenario.obstacle.zmax << ","
         << static_cast<int>(scenario.direct_path_blocked);
     for (int i = 0; i < ManipulatorDynamicsModel::kDof; ++i) {
       ofs << "," << pair.init_pose.q[static_cast<std::size_t>(i)];
@@ -674,10 +669,6 @@ inline void writeStatsHeader(std::ofstream &ofs) {
          "init_collision,goal_collision,reached,success,"
          "solve_iterations,executed_steps,max_iter,total_solver_elapsed_s,"
          "q_tol,ee_tol,qdot_tol,max_pair_q_distance,mean_solver_elapsed_s,"
-         "total_rollout_elapsed_s,mean_rollout_elapsed_s,"
-         "total_clustering_elapsed_s,mean_clustering_elapsed_s,"
-         "total_connection_elapsed_s,mean_connection_elapsed_s,"
-         "total_guide_elapsed_s,mean_guide_elapsed_s,"
          "wall_elapsed_s,final_q_error,final_ee_error,final_qdot_norm,"
          "collision_count,connection_distance,horizon,samples_per_branch,"
          "samples_total_per_iter,trajectory_csv\n";
@@ -687,24 +678,22 @@ inline void writeStatsRow(std::ofstream &ofs, const BenchmarkResult &r) {
   ofs << std::setprecision(12) << r.solver_key << "," << r.solver_label << ","
       << r.scenario_index << "," << r.rollout_seed << "," << r.init_idx << ","
       << r.goal_idx << "," << r.init_name << "," << r.goal_name << ","
-      << r.obstacle_xmin << "," << r.obstacle_xmax << "," << r.obstacle_ymin
-      << "," << r.obstacle_ymax << "," << r.obstacle_zmin << ","
-      << r.obstacle_zmax << "," << static_cast<int>(r.direct_path_blocked)
-      << "," << static_cast<int>(r.init_collision) << ","
+      << r.obstacle_xmin << "," << r.obstacle_xmax << ","
+      << r.obstacle_ymin << "," << r.obstacle_ymax << ","
+      << r.obstacle_zmin << "," << r.obstacle_zmax << ","
+      << static_cast<int>(r.direct_path_blocked) << ","
+      << static_cast<int>(r.init_collision) << ","
       << static_cast<int>(r.goal_collision) << ","
       << static_cast<int>(r.reached) << "," << static_cast<int>(r.success)
       << "," << r.solve_iterations << "," << r.executed_steps << ","
-      << r.max_iter << "," << r.total_solver_elapsed << "," << r.q_tol << ","
-      << r.ee_tol << "," << r.qdot_tol << "," << r.max_pair_q_distance << ","
-      << r.mean_solver_elapsed << "," << r.total_rollout_elapsed << ","
-      << r.mean_rollout_elapsed << "," << r.total_clustering_elapsed << ","
-      << r.mean_clustering_elapsed << "," << r.total_connection_elapsed << ","
-      << r.mean_connection_elapsed << "," << r.total_guide_elapsed << ","
-      << r.mean_guide_elapsed << "," << r.wall_elapsed << "," << r.final_q_error
-      << "," << r.final_ee_error << "," << r.final_qdot_norm << ","
-      << r.collision_count << "," << r.connection_distance << "," << r.horizon
-      << "," << r.samples_per_branch << "," << r.samples_total_per_iter << ","
-      << r.trajectory_csv << "\n";
+      << r.max_iter << "," << r.total_solver_elapsed << ","
+      << r.q_tol << "," << r.ee_tol << "," << r.qdot_tol << ","
+      << r.max_pair_q_distance << "," << r.mean_solver_elapsed << ","
+      << r.wall_elapsed << "," << r.final_q_error << ","
+      << r.final_ee_error << "," << r.final_qdot_norm << ","
+      << r.collision_count << "," << r.connection_distance << ","
+      << r.horizon << "," << r.samples_per_branch << ","
+      << r.samples_total_per_iter << "," << r.trajectory_csv << "\n";
 }
 
 inline int countWorkspaceCollisions(const ManipulatorDynamicsModel &model,
@@ -728,7 +717,8 @@ inline bool directJointPathBlocked(const ManipulatorDynamicsModel &model,
 
   for (int i = 0; i <= kSegments; ++i) {
     const double alpha = static_cast<double>(i) / kSegments;
-    x.head(dof) = (1.0 - alpha) * x_init.head(dof) + alpha * x_goal.head(dof);
+    x.head(dof) =
+        (1.0 - alpha) * x_init.head(dof) + alpha * x_goal.head(dof);
     if (model.inWorkspaceCollision(x)) {
       return true;
     }
@@ -748,9 +738,9 @@ inline bool isReached(const ManipulatorDynamicsModel &model,
          qdot_norm < config.qdot_tol;
 }
 
-inline Eigen::VectorXd
-makeScenarioWaypointState(const ManipulatorDynamicsModel &model,
-                          const BenchmarkScenario &scenario) {
+inline Eigen::VectorXd makeScenarioWaypointState(
+    const ManipulatorDynamicsModel &model,
+    const BenchmarkScenario &scenario) {
   const auto poses = manipulator_pose_set::makeReferencePoseSet16();
   const std::array<int, 8> candidate_ids = {1, 5, 12, 13, 10, 8, 6, 3};
 
@@ -759,8 +749,7 @@ makeScenarioWaypointState(const ManipulatorDynamicsModel &model,
   bool found = false;
 
   for (const int id : candidate_ids) {
-    if (id == scenario.pose_pair.init_idx ||
-        id == scenario.pose_pair.goal_idx) {
+    if (id == scenario.pose_pair.init_idx || id == scenario.pose_pair.goal_idx) {
       continue;
     }
 
@@ -789,9 +778,10 @@ BenchmarkResult executeForwardScenario(
     Solver &solver, const ManipulatorDynamicsModel &model,
     const BenchmarkConfig &config, const BenchmarkScenario &scenario,
     const Eigen::VectorXd &x_goal, const Eigen::VectorXd &x_waypoint,
-    const MPPIParam &param, const std::string &solver_key,
-    const std::string &solver_label,
+    const MPPIParam &param,
+    const std::string &solver_key, const std::string &solver_label,
     const std::filesystem::path &trajectory_csv,
+    const std::filesystem::path &predicted_cost_csv,
     RolloutEEWriter *rollout_ee_writer,
     RolloutStateWriter *rollout_state_writer) {
   constexpr int dof = ManipulatorDynamicsModel::kDof;
@@ -803,27 +793,24 @@ BenchmarkResult executeForwardScenario(
   executed_x.col(0) = solver.x_init;
 
   double total_solver_elapsed = 0.0;
-  double total_rollout_elapsed = 0.0;
-  double total_clustering_elapsed = 0.0;
-  double total_connection_elapsed = 0.0;
-  double total_guide_elapsed = 0.0;
   int executed_steps = 0;
   int solve_iterations = 0;
   bool reached = false;
 
+  std::ofstream predicted_cost(predicted_cost_csv);
+  if (!predicted_cost) {
+    throw std::runtime_error("failed to open predicted trajectory cost CSV");
+  }
+  predicted_cost << "iteration,predicted_cost\n" << std::setprecision(12);
+
   const auto wall_start = std::chrono::steady_clock::now();
   for (int iter = 0; iter < config.max_iter; ++iter) {
-    if (rollout_ee_writer)
-      rollout_ee_writer->setIteration(iter);
-    if (rollout_state_writer)
-      rollout_state_writer->setIteration(iter);
+    if (rollout_ee_writer) rollout_ee_writer->setIteration(iter);
+    if (rollout_state_writer) rollout_state_writer->setIteration(iter);
     solver.solve();
+    predicted_cost << iter << ',' << solver.trajectoryCost() << '\n';
     ++solve_iterations;
     total_solver_elapsed += solver.elapsed;
-    total_rollout_elapsed += solver.elapsed_rollout;
-    total_clustering_elapsed += solver.elapsed_clustering;
-    total_connection_elapsed += solver.elapsed_connection;
-    total_guide_elapsed += solver.elapsed_guide;
 
     const Eigen::VectorXd x_now = solver.x_init;
     reached = isReached(model, x_now, x_goal, config);
@@ -891,18 +878,6 @@ BenchmarkResult executeForwardScenario(
   result.total_solver_elapsed = total_solver_elapsed;
   result.mean_solver_elapsed =
       solve_iterations > 0 ? total_solver_elapsed / solve_iterations : 0.0;
-  result.total_rollout_elapsed = total_rollout_elapsed;
-  result.mean_rollout_elapsed =
-      solve_iterations > 0 ? total_rollout_elapsed / solve_iterations : 0.0;
-  result.total_clustering_elapsed = total_clustering_elapsed;
-  result.mean_clustering_elapsed =
-      solve_iterations > 0 ? total_clustering_elapsed / solve_iterations : 0.0;
-  result.total_connection_elapsed = total_connection_elapsed;
-  result.mean_connection_elapsed =
-      solve_iterations > 0 ? total_connection_elapsed / solve_iterations : 0.0;
-  result.total_guide_elapsed = total_guide_elapsed;
-  result.mean_guide_elapsed =
-      solve_iterations > 0 ? total_guide_elapsed / solve_iterations : 0.0;
   result.wall_elapsed =
       std::chrono::duration<double>(wall_finish - wall_start).count();
   result.final_q_error = final_q_error;
@@ -926,8 +901,8 @@ int runForwardBenchmark(const std::string &solver_key,
   ManipulatorDynamicsModel model;
   configureWorkspaceModel(model, config);
 
-  const auto scenarios =
-      selectBenchmarkScenarios(makeBenchmarkScenarios(model, config), config);
+  const auto scenarios = selectBenchmarkScenarios(
+      makeBenchmarkScenarios(model, config), config);
   ensureOutputDirectories(config, solver_key);
   writeScenarioCsv(config, model, scenarios);
 
@@ -960,8 +935,7 @@ int runForwardBenchmark(const std::string &solver_key,
     param.kmeans_max_iterations = solver_params.kmeans_max_iterations;
     param.kmeans_threshold = solver_params.kmeans_threshold;
 
-    CollisionChecker cc =
-        makeWorkspaceCollisionChecker(model, scenario.obstacle);
+    CollisionChecker cc = makeWorkspaceCollisionChecker(model, scenario.obstacle);
     Solver solver(model);
     configure_solver(solver, solver_params);
     solver.U_0 = makeWaypointPdTorqueWarmStart(
@@ -973,6 +947,8 @@ int runForwardBenchmark(const std::string &solver_key,
 
     const std::filesystem::path traj_path =
         trajectoryPath(config, solver_key, scenario.index);
+    const std::filesystem::path predicted_cost_path =
+        predictedCostPath(config, solver_key, scenario.index);
     std::unique_ptr<RolloutEEWriter> rollout_ee_writer;
     std::unique_ptr<RolloutStateWriter> rollout_state_writer;
     if (config.save_rollout_ee) {
@@ -981,8 +957,8 @@ int runForwardBenchmark(const std::string &solver_key,
           rolloutEEIndexPath(config, solver_key, scenario.index));
       solver.setRolloutEECallback(
           [&rollout_ee_writer](const std::string &branch,
-                               const std::vector<std::uint8_t> &positions,
-                               int rollout_count, int point_count) {
+                              const std::vector<std::uint8_t> &positions,
+                              int rollout_count, int point_count) {
             rollout_ee_writer->append(branch, positions, rollout_count,
                                       point_count);
           });
@@ -993,16 +969,16 @@ int runForwardBenchmark(const std::string &solver_key,
           rolloutStateIndexPath(config, solver_key, scenario.index));
       solver.setRolloutStateCallback(
           [&rollout_state_writer](const std::string &branch,
-                                  const std::vector<std::uint16_t> &states,
-                                  int rollout_count, int point_count,
-                                  int state_dim) {
+                                 const std::vector<std::uint16_t> &states,
+                                 int rollout_count, int point_count,
+                                 int state_dim) {
             rollout_state_writer->append(branch, states, rollout_count,
                                          point_count, state_dim);
           });
     }
     const BenchmarkResult result = executeForwardScenario(
         solver, model, config, scenario, x_goal, x_waypoint, param, solver_key,
-        solver_label, traj_path, rollout_ee_writer.get(),
+        solver_label, traj_path, predicted_cost_path, rollout_ee_writer.get(),
         rollout_state_writer.get());
     writeStatsRow(stats, result);
 
@@ -1025,9 +1001,10 @@ BenchmarkResult executeBidirectionalScenario(
     Solver &solver, const ManipulatorDynamicsModel &model,
     const BenchmarkConfig &config, const BenchmarkScenario &scenario,
     const Eigen::VectorXd &x_goal, const Eigen::VectorXd &x_waypoint,
-    const BiMPPIParam &param, const std::string &solver_key,
-    const std::string &solver_label,
+    const BiMPPIParam &param,
+    const std::string &solver_key, const std::string &solver_label,
     const std::filesystem::path &trajectory_csv,
+    const std::filesystem::path &predicted_cost_csv,
     RolloutEEWriter *rollout_ee_writer,
     RolloutStateWriter *rollout_state_writer) {
   constexpr int dof = ManipulatorDynamicsModel::kDof;
@@ -1039,27 +1016,24 @@ BenchmarkResult executeBidirectionalScenario(
   executed_x.col(0) = solver.x_init;
 
   double total_solver_elapsed = 0.0;
-  double total_rollout_elapsed = 0.0;
-  double total_clustering_elapsed = 0.0;
-  double total_connection_elapsed = 0.0;
-  double total_guide_elapsed = 0.0;
   int executed_steps = 0;
   int solve_iterations = 0;
   bool reached = false;
 
+  std::ofstream predicted_cost(predicted_cost_csv);
+  if (!predicted_cost) {
+    throw std::runtime_error("failed to open predicted trajectory cost CSV");
+  }
+  predicted_cost << "iteration,predicted_cost\n" << std::setprecision(12);
+
   const auto wall_start = std::chrono::steady_clock::now();
   for (int iter = 0; iter < config.max_iter; ++iter) {
-    if (rollout_ee_writer)
-      rollout_ee_writer->setIteration(iter);
-    if (rollout_state_writer)
-      rollout_state_writer->setIteration(iter);
+    if (rollout_ee_writer) rollout_ee_writer->setIteration(iter);
+    if (rollout_state_writer) rollout_state_writer->setIteration(iter);
     solver.solve();
+    predicted_cost << iter << ',' << solver.trajectoryCost() << '\n';
     ++solve_iterations;
     total_solver_elapsed += solver.elapsed;
-    total_rollout_elapsed += solver.elapsed_rollout;
-    total_clustering_elapsed += solver.elapsed_clustering;
-    total_connection_elapsed += solver.elapsed_connection;
-    total_guide_elapsed += solver.elapsed_guide;
 
     const Eigen::VectorXd x_now = solver.x_init;
     reached = isReached(model, x_now, x_goal, config);
@@ -1082,9 +1056,6 @@ BenchmarkResult executeBidirectionalScenario(
           model, solver.x_init, x_waypoint, x_goal, param.Tf, param.dt,
           config.warm_start_kp, config.warm_start_kd);
     }
-    solver.U_b0 =
-        makePdTorqueWarmStart(model, solver.x_init, x_goal, param.Tb, param.dt,
-                              config.warm_start_kp, config.warm_start_kd);
   }
   const auto wall_finish = std::chrono::steady_clock::now();
 
@@ -1131,18 +1102,6 @@ BenchmarkResult executeBidirectionalScenario(
   result.total_solver_elapsed = total_solver_elapsed;
   result.mean_solver_elapsed =
       solve_iterations > 0 ? total_solver_elapsed / solve_iterations : 0.0;
-  result.total_rollout_elapsed = total_rollout_elapsed;
-  result.mean_rollout_elapsed =
-      solve_iterations > 0 ? total_rollout_elapsed / solve_iterations : 0.0;
-  result.total_clustering_elapsed = total_clustering_elapsed;
-  result.mean_clustering_elapsed =
-      solve_iterations > 0 ? total_clustering_elapsed / solve_iterations : 0.0;
-  result.total_connection_elapsed = total_connection_elapsed;
-  result.mean_connection_elapsed =
-      solve_iterations > 0 ? total_connection_elapsed / solve_iterations : 0.0;
-  result.total_guide_elapsed = total_guide_elapsed;
-  result.mean_guide_elapsed =
-      solve_iterations > 0 ? total_guide_elapsed / solve_iterations : 0.0;
   result.wall_elapsed =
       std::chrono::duration<double>(wall_finish - wall_start).count();
   result.final_q_error = final_q_error;
@@ -1165,8 +1124,8 @@ int runBidirectionalBenchmark(const std::string &solver_key,
   ManipulatorDynamicsModel model;
   configureWorkspaceModel(model, config);
 
-  const auto scenarios =
-      selectBenchmarkScenarios(makeBenchmarkScenarios(model, config), config);
+  const auto scenarios = selectBenchmarkScenarios(
+      makeBenchmarkScenarios(model, config), config);
   ensureOutputDirectories(config, solver_key);
   writeScenarioCsv(config, model, scenarios);
 
@@ -1207,8 +1166,7 @@ int runBidirectionalBenchmark(const std::string &solver_key,
     param.kmeans_max_iterations = solver_params.kmeans_max_iterations;
     param.kmeans_threshold = solver_params.kmeans_threshold;
 
-    CollisionChecker cc =
-        makeWorkspaceCollisionChecker(model, scenario.obstacle);
+    CollisionChecker cc = makeWorkspaceCollisionChecker(model, scenario.obstacle);
     Solver solver(model);
     solver.init(param);
     solver.setCollisionChecker(&cc);
@@ -1216,12 +1174,14 @@ int runBidirectionalBenchmark(const std::string &solver_key,
     solver.U_f0 = makeWaypointPdTorqueWarmStart(
         model, x_init, x_waypoint, x_goal, param.Tf, param.dt,
         config.warm_start_kp, config.warm_start_kd);
-    solver.U_b0 =
-        makePdTorqueWarmStart(model, x_init, x_goal, param.Tb, param.dt,
-                              config.warm_start_kp, config.warm_start_kd);
+    solver.U_b0 = makePdTorqueWarmStart(model, x_init, x_goal, param.Tb,
+                                        param.dt, config.warm_start_kp,
+                                        config.warm_start_kd);
 
     const std::filesystem::path traj_path =
         trajectoryPath(config, solver_key, scenario.index);
+    const std::filesystem::path predicted_cost_path =
+        predictedCostPath(config, solver_key, scenario.index);
     std::unique_ptr<RolloutEEWriter> rollout_ee_writer;
     std::unique_ptr<RolloutStateWriter> rollout_state_writer;
     if (config.save_rollout_ee) {
@@ -1230,8 +1190,8 @@ int runBidirectionalBenchmark(const std::string &solver_key,
           rolloutEEIndexPath(config, solver_key, scenario.index));
       solver.setRolloutEECallback(
           [&rollout_ee_writer](const std::string &branch,
-                               const std::vector<std::uint8_t> &positions,
-                               int rollout_count, int point_count) {
+                              const std::vector<std::uint8_t> &positions,
+                              int rollout_count, int point_count) {
             rollout_ee_writer->append(branch, positions, rollout_count,
                                       point_count);
           });
@@ -1242,16 +1202,16 @@ int runBidirectionalBenchmark(const std::string &solver_key,
           rolloutStateIndexPath(config, solver_key, scenario.index));
       solver.setRolloutStateCallback(
           [&rollout_state_writer](const std::string &branch,
-                                  const std::vector<std::uint16_t> &states,
-                                  int rollout_count, int point_count,
-                                  int state_dim) {
+                                 const std::vector<std::uint16_t> &states,
+                                 int rollout_count, int point_count,
+                                 int state_dim) {
             rollout_state_writer->append(branch, states, rollout_count,
                                          point_count, state_dim);
           });
     }
     const BenchmarkResult result = executeBidirectionalScenario(
         solver, model, config, scenario, x_goal, x_waypoint, param, solver_key,
-        solver_label, traj_path, rollout_ee_writer.get(),
+        solver_label, traj_path, predicted_cost_path, rollout_ee_writer.get(),
         rollout_state_writer.get());
     writeStatsRow(stats, result);
 
@@ -1269,4 +1229,4 @@ int runBidirectionalBenchmark(const std::string &solver_key,
   return 0;
 }
 
-} // namespace manipulator_random_pose_benchmark
+}  // namespace manipulator_random_pose_benchmark

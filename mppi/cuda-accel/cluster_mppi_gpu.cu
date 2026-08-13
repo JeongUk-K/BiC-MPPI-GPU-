@@ -254,7 +254,7 @@ void ClusterMPPI_GPU::calculateU(Eigen::MatrixXd &Uout,
     }
     // Clamp
     Eigen::Ref<Eigen::MatrixXd> slice = Uout.middleRows(idx * dim_u, dim_u);
-    h(slice);
+    if (h) h(slice);
   }
 }
 
@@ -317,18 +317,11 @@ void ClusterMPPI_GPU::solve() {
   for (int ci = 0; ci < (int)clusters.size(); ++ci) {
     Eigen::MatrixXd Xi(dim_x, T + 1);
     Xi.col(0) = x_init;
-    double cost = 0.0;
     for (int j = 0; j < T; ++j) {
-      cost += p(Xi.col(j), x_target);
       Xi.col(j + 1) = Xi.col(j) + (double)dt * f(Xi.col(j), U.block(ci * dim_u, j, dim_u, 1));
     }
-    cost += p(Xi.col(T), x_target);
-    for (int j = 1; j < T + 1; ++j) {
-      if (collision_checker->getCollisionGrid(Xi.col(j))) {
-        cost = 1e8;
-        break;
-      }
-    }
+    const Eigen::MatrixXd Ui = U.middleRows(ci * dim_u, dim_u);
+    const double cost = evaluateTrajectoryCost(Xi, Ui);
     if (cost < min_cost) { min_cost = cost; min_idx = ci; }
   }
 
@@ -348,7 +341,7 @@ void ClusterMPPI_GPU::solve() {
   for (int j = 0; j < T; ++j) {
     Xo.col(j + 1) = Xo.col(j) + (double)dt * f(Xo.col(j), Uo.col(j));
   }
-  cost = evaluateTrajectoryCost(Xo);
+  cost = evaluateTrajectoryCost(Xo, Uo);
 
   // ── Visualization data export ──
   if (vis_logger && vis_logger->enabled) {

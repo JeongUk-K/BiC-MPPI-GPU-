@@ -1,6 +1,7 @@
 #pragma once
 
 #include <Eigen/Dense>
+#include <functional>
 #include <vector>
 
 // Maximum dimensions for GPU kernels (to avoid Variable Length Arrays)
@@ -12,7 +13,7 @@
 class ModelBase {
 public:
     ModelBase();
-    ~ModelBase();
+    virtual ~ModelBase();
 
     int dim_x;
     int dim_u;
@@ -37,6 +38,5 @@ inline ModelBase::ModelBase() {
 
 inline ModelBase::~ModelBase() {
 };
-
 
 

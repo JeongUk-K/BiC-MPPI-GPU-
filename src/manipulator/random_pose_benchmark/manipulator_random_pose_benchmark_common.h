@@ -30,75 +30,30 @@ namespace manipulator_random_pose_benchmark {
 
 using JointNoiseSigma = std::array<double, ManipulatorDynamicsModel::kDof>;
 
-struct RandomPoseBenchmarkSolverParams {
-  struct Solver {
-    float dt = 0.02f;
-    int forward_horizon = 90;
-    int forward_samples = 4096;
-    int backward_horizon = 90;
-    int backward_samples = 4096;
-    int reverse_samples = 4096;
-    double gamma_u = 0.0015;
-    JointNoiseSigma sigma = {4.5, 4.5, 3.8, 2.2, 1.8, 1.2};
-    ClusteringMethod clustering_method = ClusteringMethod::DBSCAN;
-    int kmeans_clusters = 5;
-    int kmeans_max_iterations = 100;
-    double kmeans_threshold = 1e-6;
+struct SolverParams {
+  float dt = 0.02f;
+  int forward_horizon = 90;
+  int forward_samples = 4096;
+  int backward_horizon = 90;
+  int backward_samples = 4096;
+  int reverse_samples = 4096;
+  double gamma_u = 0.0015;
+  JointNoiseSigma sigma = {4.5, 4.5, 3.8, 2.2, 1.8, 1.2};
+  ClusteringMethod clustering_method = ClusteringMethod::DBSCAN;
+  int kmeans_clusters = 5;
+  int kmeans_max_iterations = 100;
+  double kmeans_threshold = 1e-6;
 
-    double cluster_deviation_mu = 1.0;
-    double cluster_epsilon = 3.8;
-    int cluster_minpts = 8;
+  double cluster_deviation_mu = 1.0;
+  double cluster_epsilon = 3.8;
+  int cluster_minpts = 8;
 
-    double bic_deviation_mu = 1.0;
-    double bic_cost_mu = 1.0;
-    double bic_epsilon = 3.8;
-    int bic_minpts = 8;
-    double bic_psi = 0.0;
-  };
-
-  Solver mppi;
-  Solver logmppi;
-  Solver clustermppi;
-  Solver bicmppi;
+  double bic_deviation_mu = 1.0;
+  double bic_cost_mu = 1.0;
+  double bic_epsilon = 3.8;
+  int bic_minpts = 8;
+  double bic_psi = 0.0;
 };
-
-using SolverParams = RandomPoseBenchmarkSolverParams::Solver;
-
-// Tune all random-pose benchmark solver parameters here.
-inline RandomPoseBenchmarkSolverParams randomPoseSolverParams() {
-  RandomPoseBenchmarkSolverParams params;
-
-  params.mppi.dt = 0.02f;
-  params.mppi.forward_horizon = 90;
-  params.mppi.forward_samples = 4096;
-  params.mppi.gamma_u = 0.0015;
-  params.mppi.sigma = {4.5, 4.5, 3.8, 2.2, 1.8, 1.2};
-
-  params.logmppi = params.mppi;
-
-  params.clustermppi = params.mppi;
-  params.clustermppi.cluster_deviation_mu = 1.0;
-  params.clustermppi.cluster_epsilon = 3.8;
-  params.clustermppi.cluster_minpts = 8;
-  params.clustermppi.clustering_method = ClusteringMethod::KMeans;
-
-  params.bicmppi.dt = 0.02f;
-  params.bicmppi.forward_horizon = 45;
-  params.bicmppi.backward_horizon = 45;
-  params.bicmppi.forward_samples = 4096;
-  params.bicmppi.backward_samples = 4096;
-  params.bicmppi.reverse_samples = 4096;
-  params.bicmppi.gamma_u = 0.0015;
-  params.bicmppi.sigma = {4.5, 4.5, 3.8, 2.2, 1.8, 1.2};
-  params.bicmppi.bic_deviation_mu = 1.0;
-  params.bicmppi.bic_cost_mu = 1.0;
-  params.bicmppi.bic_epsilon = 3.8;
-  params.bicmppi.bic_minpts = 8;
-  params.bicmppi.bic_psi = 0.0;
-  params.bicmppi.clustering_method = ClusteringMethod::KMeans;
-
-  return params;
-}
 
 struct BenchmarkConfig {
   static constexpr int kReferencePoseCount = 16;
@@ -585,6 +540,12 @@ inline std::vector<BenchmarkScenario> makeBenchmarkScenarios(
       scenario.direct_path_blocked =
           directJointPathBlocked(model, x_init, x_goal);
       scenarios.push_back(scenario);
+      if (static_cast<int>(scenarios.size()) == config.scenario_count) {
+        break;
+      }
+    }
+    if (static_cast<int>(scenarios.size()) == config.scenario_count) {
+      break;
     }
   }
 
@@ -910,108 +871,6 @@ BenchmarkResult executeForwardScenario(
   return result;
 }
 
-template <typename Solver, typename ConfigureSolver>
-int runForwardBenchmark(const std::string &solver_key,
-                        const std::string &solver_label,
-                        const SolverParams &solver_params,
-                        ConfigureSolver configure_solver) {
-  BenchmarkConfig config = benchmarkConfigFromEnvironment();
-  ManipulatorDynamicsModel model;
-  configureWorkspaceModel(model, config);
-
-  const auto scenarios = selectBenchmarkScenarios(
-      makeBenchmarkScenarios(model, config), config);
-  ensureOutputDirectories(config, solver_key);
-  writeScenarioCsv(config, model, scenarios);
-
-  std::ofstream stats(solverStatsPath(config, solver_key));
-  if (!stats) {
-    throw std::runtime_error("failed to open solver stats CSV");
-  }
-  writeStatsHeader(stats);
-
-  for (const auto &scenario : scenarios) {
-    applyScenarioObstacle(model, scenario.obstacle);
-
-    const Eigen::VectorXd x_init = manipulator_pose_set::makeStateFromPose(
-        model, scenario.pose_pair.init_pose);
-    const Eigen::VectorXd x_goal = manipulator_pose_set::makeStateFromPose(
-        model, scenario.pose_pair.goal_pose);
-    const Eigen::VectorXd x_waypoint =
-        makeScenarioWaypointState(model, scenario);
-
-    MPPIParam param;
-    param.dt = solver_params.dt;
-    param.T = solver_params.forward_horizon;
-    param.N = solver_params.forward_samples;
-    param.gamma_u = solver_params.gamma_u;
-    param.x_init = x_init;
-    param.x_target = x_goal;
-    param.sigma_u = makeSigmaMatrix(solver_params.sigma);
-    param.clustering_method = solver_params.clustering_method;
-    param.kmeans_clusters = solver_params.kmeans_clusters;
-    param.kmeans_max_iterations = solver_params.kmeans_max_iterations;
-    param.kmeans_threshold = solver_params.kmeans_threshold;
-
-    CollisionChecker cc = makeWorkspaceCollisionChecker(model, scenario.obstacle);
-    Solver solver(model);
-    configure_solver(solver, solver_params);
-    solver.U_0 = makeWaypointPdTorqueWarmStart(
-        model, x_init, x_waypoint, x_goal, param.T, param.dt,
-        config.warm_start_kp, config.warm_start_kd);
-    solver.init(param);
-    solver.setCollisionChecker(&cc);
-    solver.setSeed(scenario.rollout_seed);
-
-    const std::filesystem::path traj_path =
-        trajectoryPath(config, solver_key, scenario.index);
-    std::unique_ptr<RolloutEEWriter> rollout_ee_writer;
-    std::unique_ptr<RolloutStateWriter> rollout_state_writer;
-    if (config.save_rollout_ee) {
-      rollout_ee_writer = std::make_unique<RolloutEEWriter>(
-          rolloutEEPath(config, solver_key, scenario.index),
-          rolloutEEIndexPath(config, solver_key, scenario.index));
-      solver.setRolloutEECallback(
-          [&rollout_ee_writer](const std::string &branch,
-                              const std::vector<std::uint8_t> &positions,
-                              int rollout_count, int point_count) {
-            rollout_ee_writer->append(branch, positions, rollout_count,
-                                      point_count);
-          });
-    }
-    if (config.save_rollout_state) {
-      rollout_state_writer = std::make_unique<RolloutStateWriter>(
-          rolloutStatePath(config, solver_key, scenario.index),
-          rolloutStateIndexPath(config, solver_key, scenario.index));
-      solver.setRolloutStateCallback(
-          [&rollout_state_writer](const std::string &branch,
-                                 const std::vector<std::uint16_t> &states,
-                                 int rollout_count, int point_count,
-                                 int state_dim) {
-            rollout_state_writer->append(branch, states, rollout_count,
-                                         point_count, state_dim);
-          });
-    }
-    const BenchmarkResult result = executeForwardScenario(
-        solver, model, config, scenario, x_goal, x_waypoint, param, solver_key,
-        solver_label, traj_path, rollout_ee_writer.get(),
-        rollout_state_writer.get());
-    writeStatsRow(stats, result);
-
-    std::cout << solver_label << " " << scenarioTag(scenario.index)
-              << " init=" << scenario.pose_pair.init_pose.name
-              << " goal=" << scenario.pose_pair.goal_pose.name
-              << " success=" << static_cast<int>(result.success)
-              << " iter=" << result.solve_iterations
-              << " solver_time=" << result.total_solver_elapsed << " s"
-              << " collisions=" << result.collision_count << "\n";
-  }
-
-  std::cout << solver_label << " stats: " << solverStatsPath(config, solver_key)
-            << "\n";
-  return 0;
-}
-
 template <typename Solver>
 BenchmarkResult executeBidirectionalScenario(
     Solver &solver, const ManipulatorDynamicsModel &model,
@@ -1072,9 +931,15 @@ BenchmarkResult executeBidirectionalScenario(
           model, solver.x_init, x_waypoint, x_goal, param.Tf, param.dt,
           config.warm_start_kp, config.warm_start_kd);
     }
-    solver.U_b0 = makePdTorqueWarmStart(
-        model, solver.x_init, x_goal, param.Tb, param.dt,
-        config.warm_start_kp, config.warm_start_kd);
+    if (solver.U_b0.cols() >= param.Tb) {
+      solver.U_b0.leftCols(param.Tb - 1) =
+          solver.U_b0.middleCols(1, param.Tb - 1);
+      solver.U_b0.col(param.Tb - 1).setZero();
+    } else {
+      solver.U_b0 = makePdTorqueWarmStart(
+          model, solver.x_init, x_goal, param.Tb, param.dt,
+          config.warm_start_kp, config.warm_start_kd);
+    }
   }
   const auto wall_finish = std::chrono::steady_clock::now();
 
@@ -1147,34 +1012,111 @@ BenchmarkResult executeBidirectionalScenario(
   return result;
 }
 
-template <typename Solver>
-int runBidirectionalBenchmark(const std::string &solver_key,
-                              const std::string &solver_label,
-                              const SolverParams &solver_params) {
-  BenchmarkConfig config = benchmarkConfigFromEnvironment();
-  ManipulatorDynamicsModel model;
-  configureWorkspaceModel(model, config);
+class BenchmarkRunner {
+ public:
+  BenchmarkRunner(const std::string &solver_key,
+                  const std::string &solver_label)
+      : solver_key_(solver_key), solver_label_(solver_label), model_() {
+    configureWorkspaceModel(model_, config_);
+    scenarios_ = selectBenchmarkScenarios(
+        makeBenchmarkScenarios(model_, config_), config_);
+    ensureOutputDirectories(config_, solver_key_);
+    writeScenarioCsv(config_, model_, scenarios_);
 
-  const auto scenarios = selectBenchmarkScenarios(
-      makeBenchmarkScenarios(model, config), config);
-  ensureOutputDirectories(config, solver_key);
-  writeScenarioCsv(config, model, scenarios);
-
-  std::ofstream stats(solverStatsPath(config, solver_key));
-  if (!stats) {
-    throw std::runtime_error("failed to open solver stats CSV");
+    stats_.open(solverStatsPath(config_, solver_key_));
+    if (!stats_) {
+      throw std::runtime_error("failed to open solver stats CSV");
+    }
+    writeStatsHeader(stats_);
   }
-  writeStatsHeader(stats);
 
-  for (const auto &scenario : scenarios) {
-    applyScenarioObstacle(model, scenario.obstacle);
+  const std::vector<BenchmarkScenario> &scenarios() const { return scenarios_; }
+
+  template <typename Solver, typename ConfigureSolver>
+  void runForwardScenario(const BenchmarkScenario &scenario,
+                          const SolverParams &solver_params,
+                          ConfigureSolver configure_solver) {
+    applyScenarioObstacle(model_, scenario.obstacle);
 
     const Eigen::VectorXd x_init = manipulator_pose_set::makeStateFromPose(
-        model, scenario.pose_pair.init_pose);
+        model_, scenario.pose_pair.init_pose);
     const Eigen::VectorXd x_goal = manipulator_pose_set::makeStateFromPose(
-        model, scenario.pose_pair.goal_pose);
+        model_, scenario.pose_pair.goal_pose);
     const Eigen::VectorXd x_waypoint =
-        makeScenarioWaypointState(model, scenario);
+        makeScenarioWaypointState(model_, scenario);
+
+    MPPIParam param;
+    param.dt = solver_params.dt;
+    param.T = solver_params.forward_horizon;
+    param.N = solver_params.forward_samples;
+    param.gamma_u = solver_params.gamma_u;
+    param.x_init = x_init;
+    param.x_target = x_goal;
+    param.sigma_u = makeSigmaMatrix(solver_params.sigma);
+    param.clustering_method = solver_params.clustering_method;
+    param.kmeans_clusters = solver_params.kmeans_clusters;
+    param.kmeans_max_iterations = solver_params.kmeans_max_iterations;
+    param.kmeans_threshold = solver_params.kmeans_threshold;
+
+    CollisionChecker cc = makeWorkspaceCollisionChecker(model_, scenario.obstacle);
+    Solver solver(model_);
+    configure_solver(solver, solver_params);
+    solver.U_0 = makeWaypointPdTorqueWarmStart(
+        model_, x_init, x_waypoint, x_goal, param.T, param.dt,
+        config_.warm_start_kp, config_.warm_start_kd);
+    solver.init(param);
+    solver.setCollisionChecker(&cc);
+    solver.setSeed(scenario.rollout_seed);
+
+    const std::filesystem::path traj_path =
+        trajectoryPath(config_, solver_key_, scenario.index);
+    std::unique_ptr<RolloutEEWriter> rollout_ee_writer;
+    std::unique_ptr<RolloutStateWriter> rollout_state_writer;
+    if (config_.save_rollout_ee) {
+      rollout_ee_writer = std::make_unique<RolloutEEWriter>(
+          rolloutEEPath(config_, solver_key_, scenario.index),
+          rolloutEEIndexPath(config_, solver_key_, scenario.index));
+      solver.setRolloutEECallback(
+          [&rollout_ee_writer](const std::string &branch,
+                              const std::vector<std::uint8_t> &positions,
+                              int rollout_count, int point_count) {
+            rollout_ee_writer->append(branch, positions, rollout_count,
+                                      point_count);
+          });
+    }
+    if (config_.save_rollout_state) {
+      rollout_state_writer = std::make_unique<RolloutStateWriter>(
+          rolloutStatePath(config_, solver_key_, scenario.index),
+          rolloutStateIndexPath(config_, solver_key_, scenario.index));
+      solver.setRolloutStateCallback(
+          [&rollout_state_writer](const std::string &branch,
+                                 const std::vector<std::uint16_t> &states,
+                                 int rollout_count, int point_count,
+                                 int state_dim) {
+            rollout_state_writer->append(branch, states, rollout_count,
+                                         point_count, state_dim);
+          });
+    }
+
+    const BenchmarkResult result = executeForwardScenario(
+        solver, model_, config_, scenario, x_goal, x_waypoint, param,
+        solver_key_, solver_label_, traj_path, rollout_ee_writer.get(),
+        rollout_state_writer.get());
+    writeStatsRow(stats_, result);
+    printResult(result);
+  }
+
+  template <typename Solver>
+  void runBidirectionalScenario(const BenchmarkScenario &scenario,
+                                const SolverParams &solver_params) {
+    applyScenarioObstacle(model_, scenario.obstacle);
+
+    const Eigen::VectorXd x_init = manipulator_pose_set::makeStateFromPose(
+        model_, scenario.pose_pair.init_pose);
+    const Eigen::VectorXd x_goal = manipulator_pose_set::makeStateFromPose(
+        model_, scenario.pose_pair.goal_pose);
+    const Eigen::VectorXd x_waypoint =
+        makeScenarioWaypointState(model_, scenario);
 
     BiMPPIParam param;
     param.dt = solver_params.dt;
@@ -1197,26 +1139,26 @@ int runBidirectionalBenchmark(const std::string &solver_key,
     param.kmeans_max_iterations = solver_params.kmeans_max_iterations;
     param.kmeans_threshold = solver_params.kmeans_threshold;
 
-    CollisionChecker cc = makeWorkspaceCollisionChecker(model, scenario.obstacle);
-    Solver solver(model);
+    CollisionChecker cc = makeWorkspaceCollisionChecker(model_, scenario.obstacle);
+    Solver solver(model_);
     solver.init(param);
     solver.setCollisionChecker(&cc);
     solver.setSeed(scenario.rollout_seed);
     solver.U_f0 = makeWaypointPdTorqueWarmStart(
-        model, x_init, x_waypoint, x_goal, param.Tf, param.dt,
-        config.warm_start_kp, config.warm_start_kd);
-    solver.U_b0 = makePdTorqueWarmStart(model, x_init, x_goal, param.Tb,
-                                        param.dt, config.warm_start_kp,
-                                        config.warm_start_kd);
+        model_, x_init, x_waypoint, x_goal, param.Tf, param.dt,
+        config_.warm_start_kp, config_.warm_start_kd);
+    solver.U_b0 = makePdTorqueWarmStart(
+        model_, x_init, x_goal, param.Tb, param.dt, config_.warm_start_kp,
+        config_.warm_start_kd);
 
     const std::filesystem::path traj_path =
-        trajectoryPath(config, solver_key, scenario.index);
+        trajectoryPath(config_, solver_key_, scenario.index);
     std::unique_ptr<RolloutEEWriter> rollout_ee_writer;
     std::unique_ptr<RolloutStateWriter> rollout_state_writer;
-    if (config.save_rollout_ee) {
+    if (config_.save_rollout_ee) {
       rollout_ee_writer = std::make_unique<RolloutEEWriter>(
-          rolloutEEPath(config, solver_key, scenario.index),
-          rolloutEEIndexPath(config, solver_key, scenario.index));
+          rolloutEEPath(config_, solver_key_, scenario.index),
+          rolloutEEIndexPath(config_, solver_key_, scenario.index));
       solver.setRolloutEECallback(
           [&rollout_ee_writer](const std::string &branch,
                               const std::vector<std::uint8_t> &positions,
@@ -1225,10 +1167,10 @@ int runBidirectionalBenchmark(const std::string &solver_key,
                                       point_count);
           });
     }
-    if (config.save_rollout_state) {
+    if (config_.save_rollout_state) {
       rollout_state_writer = std::make_unique<RolloutStateWriter>(
-          rolloutStatePath(config, solver_key, scenario.index),
-          rolloutStateIndexPath(config, solver_key, scenario.index));
+          rolloutStatePath(config_, solver_key_, scenario.index),
+          rolloutStateIndexPath(config_, solver_key_, scenario.index));
       solver.setRolloutStateCallback(
           [&rollout_state_writer](const std::string &branch,
                                  const std::vector<std::uint16_t> &states,
@@ -1238,24 +1180,38 @@ int runBidirectionalBenchmark(const std::string &solver_key,
                                          point_count, state_dim);
           });
     }
-    const BenchmarkResult result = executeBidirectionalScenario(
-        solver, model, config, scenario, x_goal, x_waypoint, param, solver_key,
-        solver_label, traj_path, rollout_ee_writer.get(),
-        rollout_state_writer.get());
-    writeStatsRow(stats, result);
 
-    std::cout << solver_label << " " << scenarioTag(scenario.index)
-              << " init=" << scenario.pose_pair.init_pose.name
-              << " goal=" << scenario.pose_pair.goal_pose.name
+    const BenchmarkResult result = executeBidirectionalScenario(
+        solver, model_, config_, scenario, x_goal, x_waypoint, param,
+        solver_key_, solver_label_, traj_path, rollout_ee_writer.get(),
+        rollout_state_writer.get());
+    writeStatsRow(stats_, result);
+    printResult(result);
+  }
+
+  int finish() {
+    stats_.flush();
+    std::cout << solver_label_ << " stats: "
+              << solverStatsPath(config_, solver_key_) << "\n";
+    return 0;
+  }
+
+ private:
+  void printResult(const BenchmarkResult &result) const {
+    std::cout << solver_label_ << " " << scenarioTag(result.scenario_index)
+              << " init=" << result.init_name << " goal=" << result.goal_name
               << " success=" << static_cast<int>(result.success)
               << " iter=" << result.solve_iterations
               << " solver_time=" << result.total_solver_elapsed << " s"
               << " collisions=" << result.collision_count << "\n";
   }
 
-  std::cout << solver_label << " stats: " << solverStatsPath(config, solver_key)
-            << "\n";
-  return 0;
-}
+  BenchmarkConfig config_ = benchmarkConfigFromEnvironment();
+  std::string solver_key_;
+  std::string solver_label_;
+  ManipulatorDynamicsModel model_;
+  std::vector<BenchmarkScenario> scenarios_;
+  std::ofstream stats_;
+};
 
 }  // namespace manipulator_random_pose_benchmark

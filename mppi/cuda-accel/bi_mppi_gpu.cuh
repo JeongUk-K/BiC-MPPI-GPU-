@@ -5,14 +5,18 @@
 #include "mppi_vis_logger.h"
 #include "model_base.h"
 #include "mppi_param.h"
+#include "rollout_ee_callback.h"
+#include "rollout_state_callback.h"
 
 #include <Eigen/Dense>
 #include <chrono>
 #include <cstdint>
 #include <ctime>
 #include <deque>
+#include <future>
 #include <map>
 #include <limits>
+#include <mutex>
 #include <numeric>
 #include <typeinfo>
 #include <vector>
@@ -44,6 +48,12 @@ public:
   void guideReference(const Eigen::MatrixXd &Uref,
                       const Eigen::MatrixXd &Xref);
   void setVisLogger(MPPIVisLogger *logger) { vis_logger = logger; }
+  void setRolloutEECallback(RolloutEEBatchCallback callback) {
+    rollout_ee_callback = std::move(callback);
+  }
+  void setRolloutStateCallback(RolloutStateBatchCallback callback) {
+    rollout_state_callback = std::move(callback);
+  }
 
   // ---- Public state (mirrors CPU BiMPPI) ----
   Eigen::MatrixXd U_f0; // dim_u x Tf
@@ -84,6 +94,8 @@ protected:
 
   CollisionChecker *collision_checker;
   MPPIVisLogger *vis_logger = nullptr;
+  RolloutEEBatchCallback rollout_ee_callback;
+  RolloutStateBatchCallback rollout_state_callback;
 
   // CPU cluster data
   std::vector<std::vector<int>> clusters_f, clusters_b;
@@ -112,6 +124,11 @@ protected:
   double map_resolution;
   bool with_map;
   curandGenerator_t curand_gen;
+  curandGenerator_t curand_gen_forward;
+  curandGenerator_t curand_gen_backward;
+  cudaStream_t stream_forward;
+  cudaStream_t stream_backward;
+  mutable std::mutex branch_state_mutex;
 
   int alloc_Nf, alloc_Nb, alloc_Tf, alloc_Tb; // last allocated sizes
   int alloc_Tr_guide;
@@ -140,10 +157,12 @@ protected:
   void clusterControlsDevice(const double *device_controls,
                              const double *device_costs, int sample_count,
                              int horizon, Eigen::MatrixXd &clustered_controls,
-                             std::vector<std::vector<int>> &clusters);
+                             std::vector<std::vector<int>> &clusters,
+                             cudaStream_t stream = 0);
   void appendDeviceVisRolloutSamples(const double *device_controls,
                                      int sample_count, int horizon,
-                                     bool backward);
+                                     bool backward,
+                                     cudaStream_t stream = 0);
   Eigen::MatrixXd reduceControlsDevice(const double *device_controls,
                                       const double *device_costs,
                                       int sample_count, int horizon);
@@ -169,7 +188,8 @@ protected:
                   const std::vector<std::vector<int>> &clusters,
                   const Eigen::VectorXd &costs, const Eigen::MatrixXd &Ui_cpu,
                   int T_steps);
-  double evaluateTrajectoryCost(const Eigen::MatrixXd &trajectory) const;
+  double evaluateTrajectoryCost(const Eigen::MatrixXd &trajectory,
+                                const Eigen::MatrixXd &controls) const;
 };
 
 template <typename ModelClass> BiMPPI_GPU::BiMPPI_GPU(ModelClass model) {
@@ -193,12 +213,34 @@ template <typename ModelClass> BiMPPI_GPU::BiMPPI_GPU(ModelClass model) {
   alloc_Nf = alloc_Nb = alloc_Tf = alloc_Tb = 0;
   alloc_Tr_guide = 0;
   curand_gen = nullptr;
+  curand_gen_forward = nullptr;
+  curand_gen_backward = nullptr;
+  stream_forward = nullptr;
+  stream_backward = nullptr;
+  CUDA_CHECK(cudaStreamCreateWithFlags(&stream_forward, cudaStreamNonBlocking));
+  CUDA_CHECK(cudaStreamCreateWithFlags(&stream_backward, cudaStreamNonBlocking));
+  CURAND_CHECK(curandCreateGenerator(&curand_gen, CURAND_RNG_PSEUDO_DEFAULT));
+  CURAND_CHECK(curandCreateGenerator(&curand_gen_forward,
+                                     CURAND_RNG_PSEUDO_DEFAULT));
+  CURAND_CHECK(curandCreateGenerator(&curand_gen_backward,
+                                     CURAND_RNG_PSEUDO_DEFAULT));
+  CURAND_CHECK(curandSetStream(curand_gen_forward, stream_forward));
+  CURAND_CHECK(curandSetStream(curand_gen_backward, stream_backward));
+  const auto seed = static_cast<unsigned long long>(std::time(nullptr));
+  CURAND_CHECK(curandSetPseudoRandomGeneratorSeed(
+      curand_gen, seed));
+  CURAND_CHECK(curandSetPseudoRandomGeneratorSeed(curand_gen_forward, seed));
+  CURAND_CHECK(curandSetPseudoRandomGeneratorSeed(curand_gen_backward, seed + 1));
 }
 
 inline void BiMPPI_GPU::setSeed(std::uint_fast64_t seed) {
   if (!curand_gen) {
-    CURAND_CHECK(curandCreateGenerator(&curand_gen, CURAND_RNG_PSEUDO_PHILOX4_32_10));
+    CURAND_CHECK(curandCreateGenerator(&curand_gen, CURAND_RNG_PSEUDO_DEFAULT));
   }
   CURAND_CHECK(curandSetPseudoRandomGeneratorSeed(
       curand_gen, static_cast<unsigned long long>(seed)));
+  CURAND_CHECK(curandSetPseudoRandomGeneratorSeed(
+      curand_gen_forward, static_cast<unsigned long long>(seed)));
+  CURAND_CHECK(curandSetPseudoRandomGeneratorSeed(
+      curand_gen_backward, static_cast<unsigned long long>(seed + 1)));
 }

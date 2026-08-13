@@ -1,4 +1,7 @@
 #pragma once
+#ifndef MPPI_PARAM_H
+#define MPPI_PARAM_H
+
 #include <Eigen/Dense>
 #include <stdexcept>
 #include <string>
@@ -27,6 +30,12 @@ struct MPPIParam {
     int N;
     double gamma_u;
     Eigen::MatrixXd sigma_u;
+    // Deprecated legacy log-normal proposal parameters. LogMPPI_GPU ignores
+    // these and uses the same Gaussian proposal as MPPI_GPU.
+    double log_mu = 0.0;
+    double log_sigma = 1.0;
+    // <= 0 disables clipping in log space.
+    double log_clip = 0.0;
     ClusteringMethod clustering_method = ClusteringMethod::DBSCAN;
     int kmeans_clusters = 5;
     int kmeans_max_iterations = 100;
@@ -101,3 +110,5 @@ struct RRTConnectParam {
     Eigen::VectorXd state_weights; // 상태 거리 계산 시 사용할 가중치
     std::vector<int> angle_idx;   // 각도(wrapping) 처리가 필요한 상태 인덱스
 };
+
+#endif

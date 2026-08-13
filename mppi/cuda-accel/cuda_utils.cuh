@@ -92,17 +92,24 @@ __device__ __forceinline__ double warp_reduce_sum(double val) {
     bool hit = false;                                                          \
     if (check_initial_collision &&                                             \
         legacy_cuda_collision_grid(x, with_map, d_map, max_row, max_col, res,  \
-                                  d_circles, n_circ, d_rects, n_rect)) {       \
+                                  d_circles, n_circ, d_rects, n_rect, model_type)) { \
       hit = true;                                                              \
       cost = 1e8;                                                              \
     }                                                                          \
     for (int t = 0; t < T; ++t) {                                              \
       if (hit)                                                                 \
         break;                                                                 \
-      cost += legacy_cuda_terminal_cost(x, d_x_target, dim_x, model_type);     \
       double u_local[GPU_MAX_DIM_U];                                           \
       for (int _d = 0; _d < dim_u; ++_d)                                       \
         u_local[_d] = Ui_i[_d * T + t];                                        \
+      if (model_type == LEGACY_CUDA_MANIPULATOR && dim_x >= 12 &&             \
+          dim_u >= 6) {                                                        \
+        cost += dt * legacy_cuda_stage_cost(x, u_local, dim_x, dim_u,          \
+                                            model_type, d_rects, n_rect);       \
+        cost += legacy_cuda_terminal_cost(x, d_x_target, dim_x, model_type);   \
+      } else {                                                                  \
+        cost += legacy_cuda_terminal_cost(x, d_x_target, dim_x, model_type);   \
+      }                                                                         \
       legacy_cuda_dynamics(x, u_local, xd_, dim_x, dim_u, model_type);         \
       for (int d = 0; d < dim_x; ++d)                                          \
         xn[d] = x[d] + dt * xd_[d];                                            \
@@ -110,7 +117,7 @@ __device__ __forceinline__ double warp_reduce_sum(double val) {
         x[d] = xn[d];                                                          \
       if (legacy_cuda_collision_grid(x, with_map, d_map, max_row, max_col,     \
                                      res, d_circles, n_circ, d_rects,          \
-                                     n_rect)) {                                \
+                                     n_rect, model_type)) {                    \
         hit = true;                                                            \
         cost = 1e8;                                                            \
       }                                                                        \

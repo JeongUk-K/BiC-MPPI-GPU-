@@ -21,6 +21,12 @@ public:
   void solve() override;
   void init(MPPIParam param);
 
+  void setClusterParams(double dev_mu, double eps, int min_pts) {
+    deviation_mu = dev_mu;
+    epsilon = eps;
+    minpts = min_pts;
+  }
+
   void dbscan(std::vector<std::vector<int>> &clusters,
               const Eigen::MatrixXd &feature_source, const Eigen::VectorXd &costs,
               int N_samples, int T_steps);

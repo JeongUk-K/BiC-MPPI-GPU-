@@ -5,6 +5,8 @@
 #include "collision_checker.h"
 #include "model_base.h"
 #include "mppi_param.h"
+#include "rollout_ee_callback.h"
+#include "rollout_state_callback.h"
 
 #include <Eigen/Dense>
 #include <chrono>
@@ -33,6 +35,12 @@ public:
   virtual void solve();
   void move();
   void setVisLogger(MPPIVisLogger *logger) { vis_logger = logger; }
+  void setRolloutEECallback(RolloutEEBatchCallback callback) {
+    rollout_ee_callback = std::move(callback);
+  }
+  void setRolloutStateCallback(RolloutStateBatchCallback callback) {
+    rollout_state_callback = std::move(callback);
+  }
 
   // ---- Public state (same names as CPU version) ----
   Eigen::MatrixXd U_0;    // dim_u x T  warm-start control
@@ -40,9 +48,11 @@ public:
   Eigen::VectorXd x_target;
   Eigen::MatrixXd Uo;     // dim_u x T  optimal control
   Eigen::MatrixXd Xo;     // dim_x x (T+1)  optimal trajectory
+  Eigen::VectorXd u0;
   double cost = std::numeric_limits<double>::quiet_NaN();
 
   double trajectoryCost() const { return cost; }
+  double connectionDistance() const { return 0.0; }
 
   // ---- Timing (same fields as CPU version) ----
   std::chrono::time_point<std::chrono::high_resolution_clock> start, finish;
@@ -59,9 +69,10 @@ protected:
   std::vector<double> sigma_diag;
 
   CollisionChecker *collision_checker;
-  Eigen::VectorXd u0;
   std::vector<Eigen::VectorXd> visual_traj;
   MPPIVisLogger *vis_logger = nullptr;
+  RolloutEEBatchCallback rollout_ee_callback;
+  RolloutStateBatchCallback rollout_state_callback;
 
   // ---- GPU device buffers ----
   double *d_U0;      // dim_u x T
@@ -100,9 +111,11 @@ protected:
   void uploadControl();          // U_0 → d_U0
   void uploadState();            // x_init, x_target → device
   virtual void generateNoise();  // fill d_noise with N(0,1)
-  void launchRollout();          // kernel: rollout + cost per sample
-  void weightedControlSum(Eigen::MatrixXd &Uo_out); // reduction → Uo
-  double evaluateTrajectoryCost(const Eigen::MatrixXd &trajectory) const;
+  virtual void launchRollout();  // kernel: rollout + cost per sample
+  virtual void weightedControlSum(const std::vector<double> &costs,
+                                  Eigen::MatrixXd &Uo_out); // reduction → Uo
+  double evaluateTrajectoryCost(const Eigen::MatrixXd &trajectory,
+                                const Eigen::MatrixXd &controls) const;
 };
 
 // ---- Template constructor ----
@@ -126,11 +139,14 @@ MPPI_GPU::MPPI_GPU(ModelClass model) {
   with_map = false;
   collision_checker = nullptr;
   curand_gen = nullptr;
+  CURAND_CHECK(curandCreateGenerator(&curand_gen, CURAND_RNG_PSEUDO_DEFAULT));
+  CURAND_CHECK(curandSetPseudoRandomGeneratorSeed(
+      curand_gen, static_cast<unsigned long long>(std::time(nullptr))));
 }
 
 inline void MPPI_GPU::setSeed(std::uint_fast64_t seed) {
   if (!curand_gen) {
-    CURAND_CHECK(curandCreateGenerator(&curand_gen, CURAND_RNG_PSEUDO_PHILOX4_32_10));
+    CURAND_CHECK(curandCreateGenerator(&curand_gen, CURAND_RNG_PSEUDO_DEFAULT));
   }
   CURAND_CHECK(curandSetPseudoRandomGeneratorSeed(
       curand_gen, static_cast<unsigned long long>(seed)));
